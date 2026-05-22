@@ -1,0 +1,51 @@
+name: Release macOS arm64 binary
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build macOS arm64
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Set release version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/bin/sed -i '' "s/0\\.0\\.0-development/${VERSION}/" Sources/mac-vnc-server/AppVersion.swift
+          grep "static let current" Sources/mac-vnc-server/AppVersion.swift
+
+      - name: Test
+        run: swift test
+
+      - name: Build arm64 release binary
+        run: swift build -c release --arch arm64
+
+      - name: Package binary
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp .build/arm64-apple-macosx/release/mac-vnc-server dist/
+          (cd dist && shasum -a 256 mac-vnc-server > mac-vnc-server.sha256)
+          tar -C dist -czf "mac-vnc-server-${VERSION}-macos-arm64.tar.gz" mac-vnc-server mac-vnc-server.sha256
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release upload "${GITHUB_REF_NAME}" "mac-vnc-server-${VERSION}-macos-arm64.tar.gz" --clobber
+
