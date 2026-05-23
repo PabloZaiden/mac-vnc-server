@@ -66,7 +66,7 @@ enum CLI {
     }
 
     private static func parseRun(_ arguments: [String]) throws -> ServerConfig {
-        var port: UInt16 = 5902
+        var port: UInt16 = 5900
         var bindAddress = "127.0.0.1"
         var password: String? = "macvnc"
         var insecureAllowNoAuth = false
@@ -151,13 +151,13 @@ enum CLI {
     mac-vnc-server \(AppVersion.current)
 
     Usage:
-      mac-vnc-server run [--bind 127.0.0.1] [--port 5902] [--password value]
+      mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps 30] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server version
 
-    Default bind address is 127.0.0.1, default port is 5902, and default password is macvnc.
+    Default bind address is 127.0.0.1, default port is 5900, and default password is macvnc.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }

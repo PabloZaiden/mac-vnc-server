@@ -34,18 +34,13 @@ jobs:
       - name: Build arm64 release binary
         run: swift build -c release --arch arm64
 
-      - name: Package binary
+      - name: Prepare release assets
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           cp .build/arm64-apple-macosx/release/mac-vnc-server dist/
           (cd dist && shasum -a 256 mac-vnc-server > mac-vnc-server.sha256)
-          tar -C dist -czf "mac-vnc-server-${VERSION}-macos-arm64.tar.gz" mac-vnc-server mac-vnc-server.sha256
 
-      - name: Upload release asset
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release upload "${GITHUB_REF_NAME}" "mac-vnc-server-${VERSION}-macos-arm64.tar.gz" --clobber
-
+        run: gh release upload "${GITHUB_REF_NAME}" dist/mac-vnc-server dist/mac-vnc-server.sha256 --clobber

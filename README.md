@@ -5,7 +5,7 @@
 The default setup is optimized for local testing with Apple Screen Sharing:
 
 - bind address: `127.0.0.1`
-- port: `5902`
+- port: `5900`
 - password: `macvnc`
 - FPS target: `30`
 - scale: `1.0`
@@ -96,13 +96,13 @@ Default command:
 Equivalent explicit command:
 
 ```sh
-./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5902 --fps 30 --scale 1 --encoding auto --password macvnc
+./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps 30 --scale 1 --encoding auto --password macvnc
 ```
 
 Connect with Apple Screen Sharing:
 
 ```sh
-open 'vnc://127.0.0.1:5902'
+open 'vnc://127.0.0.1:5900'
 ```
 
 Password:
@@ -114,7 +114,7 @@ macvnc
 For unattended local testing, fill the native Screen Sharing password dialog with AppleScript:
 
 ```sh
-open 'vnc://127.0.0.1:5902'
+open 'vnc://127.0.0.1:5900'
 sleep 2
 osascript -e 'tell application "System Events" to keystroke "macvnc"' \
           -e 'tell application "System Events" to key code 36'
@@ -127,13 +127,13 @@ Do not store test credentials in Keychain unless you explicitly want that behavi
 Bind all interfaces:
 
 ```sh
-./.build/release/mac-vnc-server --bind 0.0.0.0 --port 5902 --password macvnc
+./.build/release/mac-vnc-server --bind 0.0.0.0 --port 5900 --password macvnc
 ```
 
 Or bind a specific LAN IP:
 
 ```sh
-./.build/release/mac-vnc-server --bind 192.168.1.10 --port 5902 --password macvnc
+./.build/release/mac-vnc-server --bind 192.168.1.10 --port 5900 --password macvnc
 ```
 
 The server refuses unauthenticated non-loopback binds by default. To disable auth for clients that support unauthenticated VNC, you must opt in explicitly:
@@ -145,8 +145,8 @@ The server refuses unauthenticated non-loopback binds by default. To disable aut
 Classic VNC password auth is weak and limited by the protocol. For untrusted networks, prefer an SSH tunnel:
 
 ```sh
-ssh -L 5902:127.0.0.1:5902 user@mac-host
-open 'vnc://127.0.0.1:5902'
+ssh -L 5900:127.0.0.1:5900 user@mac-host
+open 'vnc://127.0.0.1:5900'
 ```
 
 ## CLI
@@ -166,7 +166,7 @@ Options:
 | Option | Default | Description |
 | --- | --- | --- |
 | `--bind <ipv4>` | `127.0.0.1` | IPv4 address to listen on. |
-| `--port <port>` / `-p <port>` | `5902` | TCP port. |
+| `--port <port>` / `-p <port>` | `5900` | TCP port. |
 | `--password <value>` | `macvnc` | Classic VNC auth password. |
 | `--no-password` | off | Use unauthenticated VNC. Apple Screen Sharing does not accept this path. |
 | `--insecure-allow-no-auth` | off | Required with `--no-password` on non-loopback binds. |
@@ -240,8 +240,8 @@ Runs when a GitHub Release is published:
 - replaces `0.0.0-development` in `AppVersion.swift` with the release tag
 - runs tests
 - builds an arm64 macOS release binary
-- packages the binary plus SHA-256 checksum
-- uploads `mac-vnc-server-<version>-macos-arm64.tar.gz` to the GitHub Release
+- prepares the binary plus SHA-256 checksum
+- uploads `mac-vnc-server` and `mac-vnc-server.sha256` to the GitHub Release
 
 ## Troubleshooting
 
@@ -300,4 +300,3 @@ Run:
 ```
 
 Then restart the server after granting permissions.
-
