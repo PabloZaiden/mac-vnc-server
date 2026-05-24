@@ -5,7 +5,7 @@
 The default setup is optimized for local testing with Apple Screen Sharing:
 
 - bind address: `127.0.0.1`
-- port: `5900`
+- base port: `5900`
 - password: `macvnc`
 - FPS target: `30`
 - scale: `1.0`
@@ -99,6 +99,15 @@ Equivalent explicit command:
 ./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps 30 --scale 1 --encoding auto --password macvnc
 ```
 
+By default, the server exposes both the combined desktop and each display individually:
+
+```text
+5900  all displays, composed as one virtual framebuffer
+5901  display 1
+5902  display 2
+...   one additional port per display
+```
+
 Connect with Apple Screen Sharing:
 
 ```sh
@@ -166,13 +175,43 @@ Options:
 | Option | Default | Description |
 | --- | --- | --- |
 | `--bind <ipv4>` | `127.0.0.1` | IPv4 address to listen on. |
-| `--port <port>` / `-p <port>` | `5900` | TCP port. |
+| `--port <port>` / `-p <port>` | `5900` | TCP port, or base port when `--display` is omitted. |
 | `--password <value>` | `macvnc` | Classic VNC auth password. |
 | `--no-password` | off | Use unauthenticated VNC. Apple Screen Sharing does not accept this path. |
 | `--insecure-allow-no-auth` | off | Required with `--no-password` on non-loopback binds. |
 | `--fps <1...120>` | `30` | Target framebuffer update rate. |
 | `--scale <value>` | `1.0` | Virtual framebuffer scale. `1.0` is usually best for Retina/LAN performance. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
+| `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
+
+### Display modes
+
+Omitting `--display` starts multiple listeners. With the default base port, `5900` keeps the previous combined-desktop behavior and `5901`, `5902`, ... expose each monitor separately:
+
+```sh
+./.build/release/mac-vnc-server
+open 'vnc://127.0.0.1:5900'  # all displays
+open 'vnc://127.0.0.1:5901'  # display 1
+open 'vnc://127.0.0.1:5902'  # display 2
+```
+
+To keep a single listener with the combined desktop:
+
+```sh
+./.build/release/mac-vnc-server --display all
+```
+
+To serve only one monitor on the selected port:
+
+```sh
+./.build/release/mac-vnc-server --display 1 --port 5900
+```
+
+Use `diagnose` to list display numbers:
+
+```sh
+./.build/release/mac-vnc-server diagnose
+```
 
 ## How it works
 
@@ -193,7 +232,7 @@ Apple Screen Sharing negotiates RFB 3.3 and requires VNC auth, so the default pa
 
 ### Capture pipeline
 
-Screen capture uses `ScreenCaptureKit` with one stream per display. Captured frames are stored in BGRA format and composed into a single virtual framebuffer. The virtual framebuffer supports multiple displays and maps VNC coordinates back to macOS global coordinates for mouse input.
+Screen capture uses `ScreenCaptureKit` with one stream per selected display. Captured frames are stored in BGRA format and composed into a virtual framebuffer. The virtual framebuffer supports multiple displays and maps VNC coordinates back to macOS global coordinates for mouse input.
 
 ### Encodings
 
