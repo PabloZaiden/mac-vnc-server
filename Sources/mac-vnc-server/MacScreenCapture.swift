@@ -70,18 +70,18 @@ final class MacScreenCapture: FramebufferSource {
         do {
             let displayIDs = try activeDisplayIDs()
             print("Displays: \(displayIDs.count)")
-            for displayID in displayIDs {
+            for (index, displayID) in displayIDs.enumerated() {
                 let bounds = CGDisplayBounds(displayID)
                 let width = CGDisplayPixelsWide(displayID)
                 let height = CGDisplayPixelsHigh(displayID)
-                print("- id=\(displayID) bounds=\(bounds) pixels=\(width)x\(height)")
+                print("- display=\(index + 1) id=\(displayID) bounds=\(bounds) pixels=\(width)x\(height)")
             }
         } catch {
             print("Displays: unavailable (\(error.localizedDescription))")
         }
     }
 
-    private static func activeDisplayIDs() throws -> [CGDirectDisplayID] {
+    static func activeDisplayIDs() throws -> [CGDirectDisplayID] {
         var count: UInt32 = 0
         var result = CGGetActiveDisplayList(0, nil, &count)
         guard result == .success else {

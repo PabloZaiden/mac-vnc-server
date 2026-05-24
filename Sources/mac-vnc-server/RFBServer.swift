@@ -7,6 +7,13 @@ struct ServerConfig {
     let fps: Int
     let scale: Double
     let encodingPreference: EncodingPreference
+    let displaySelection: DisplaySelection
+}
+
+enum DisplaySelection: Equatable {
+    case automatic
+    case all
+    case display(Int)
 }
 
 enum EncodingPreference: String {
@@ -39,7 +46,7 @@ final class RFBServer {
         let listener = try ListeningSocket(bindAddress: config.bindAddress, port: config.port)
         print("mac-vnc-server \(AppVersion.current)")
         print("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
-        print("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue)")
+        print("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
         if let password = config.password {
             print("password=\(password)")
         } else {
@@ -62,6 +69,19 @@ final class RFBServer {
             } catch {
                 fputs("client disconnected: \(error.localizedDescription)\n", stderr)
             }
+        }
+    }
+}
+
+extension DisplaySelection {
+    var description: String {
+        switch self {
+        case .automatic:
+            return "auto"
+        case .all:
+            return "all"
+        case .display(let index):
+            return "\(index)"
         }
     }
 }

@@ -9,8 +9,8 @@ final class StreamingScreenCapture: FramebufferSource {
     private var streams: [SCStream]
     private var outputs: [ScreenCaptureStreamOutput]
 
-    init(scale: Double, fps: Int) async throws {
-        let started = try await Self.start(scale: CGFloat(scale), fps: fps)
+    init(scale: Double, fps: Int, displaySelection: DisplaySelection) async throws {
+        let started = try await Self.start(scale: CGFloat(scale), fps: fps, displaySelection: displaySelection)
         store = started.store
         streams = started.streams
         outputs = started.outputs
@@ -24,9 +24,15 @@ final class StreamingScreenCapture: FramebufferSource {
         try store.snapshot()
     }
 
-    private static func start(scale: CGFloat, fps: Int) async throws -> StartedCapture {
+    static func displayCount() async throws -> Int {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        let displays = content.displays.map { display in
+        return content.displays.count
+    }
+
+    private static func start(scale: CGFloat, fps: Int, displaySelection: DisplaySelection) async throws -> StartedCapture {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let selectedDisplays = try selectDisplays(from: orderedDisplays(content.displays), displaySelection: displaySelection)
+        let displays = selectedDisplays.map { display in
             VirtualDisplay(
                 id: display.displayID,
                 bounds: CGDisplayBounds(display.displayID),
@@ -43,7 +49,7 @@ final class StreamingScreenCapture: FramebufferSource {
         var streams: [SCStream] = []
         var outputs: [ScreenCaptureStreamOutput] = []
 
-        for display in content.displays {
+        for display in selectedDisplays {
             let bounds = CGDisplayBounds(display.displayID)
             let width = max(1, Int(bounds.width * scale))
             let height = max(1, Int(bounds.height * scale))
@@ -65,6 +71,33 @@ final class StreamingScreenCapture: FramebufferSource {
         }
 
         return StartedCapture(store: store, streams: streams, outputs: outputs)
+    }
+
+    private static func selectDisplays(from displays: [SCDisplay], displaySelection: DisplaySelection) throws -> [SCDisplay] {
+        guard !displays.isEmpty else {
+            throw RFBError.captureFailed("ScreenCaptureKit found no displays")
+        }
+
+        switch displaySelection {
+        case .automatic, .all:
+            return displays
+        case .display(let index):
+            guard displays.indices.contains(index - 1) else {
+                throw RFBError.captureFailed("display \(index) is not available; found \(displays.count) display(s)")
+            }
+            return [displays[index - 1]]
+        }
+    }
+
+    private static func orderedDisplays(_ displays: [SCDisplay]) -> [SCDisplay] {
+        guard let activeDisplayIDs = try? MacScreenCapture.activeDisplayIDs() else {
+            return displays
+        }
+
+        let order = Dictionary(uniqueKeysWithValues: activeDisplayIDs.enumerated().map { ($0.element, $0.offset) })
+        return displays.sorted {
+            (order[$0.displayID] ?? Int.max, $0.displayID) < (order[$1.displayID] ?? Int.max, $1.displayID)
+        }
     }
 }
 
