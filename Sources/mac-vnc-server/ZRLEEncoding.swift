@@ -65,7 +65,7 @@ final class ZRLEEncoder {
 
     private static func tileBytes(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) -> [UInt8] {
         var bytes: [UInt8] = []
-        bytes.reserveCapacity(rect.width * rect.height * cPixelByteCount(for: pixelFormat))
+        bytes.reserveCapacity(rect.width * rect.height * pixelFormat.cPixelByteCount)
 
         var tileY = rect.y
         while tileY < rect.y + rect.height {
@@ -89,44 +89,14 @@ final class ZRLEEncoder {
     }
 
     private static func appendRawTile(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat, to output: inout [UInt8]) {
-        let cPixelBytes = cPixelByteCount(for: pixelFormat)
         for row in rect.y..<(rect.y + rect.height) {
             for column in rect.x..<(rect.x + rect.width) {
                 let offset = row * framebuffer.bytesPerRow + column * 4
                 let blue = framebuffer.bgra[offset]
                 let green = framebuffer.bgra[offset + 1]
                 let red = framebuffer.bgra[offset + 2]
-
-                if pixelFormat.bigEndian {
-                    if cPixelBytes == 4 {
-                        output.append(0)
-                    }
-                    output.append(red)
-                    output.append(green)
-                    output.append(blue)
-                } else {
-                    output.append(blue)
-                    output.append(green)
-                    output.append(red)
-                    if cPixelBytes == 4 {
-                        output.append(0)
-                    }
-                }
+                output += pixelFormat.cPixelBytes(red: red, green: green, blue: blue)
             }
         }
-    }
-
-    private static func cPixelByteCount(for pixelFormat: PixelFormat) -> Int {
-        if pixelFormat.bitsPerPixel == 32,
-           pixelFormat.depth <= 24,
-           pixelFormat.redMax <= 255,
-           pixelFormat.greenMax <= 255,
-           pixelFormat.blueMax <= 255,
-           pixelFormat.redShift < 24,
-           pixelFormat.greenShift < 24,
-           pixelFormat.blueShift < 24 {
-            return 3
-        }
-        return Int(pixelFormat.bitsPerPixel / 8)
     }
 }

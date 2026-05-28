@@ -53,41 +53,11 @@ enum RawEncoding {
                 let blue = framebuffer.bgra[offset]
                 let green = framebuffer.bgra[offset + 1]
                 let red = framebuffer.bgra[offset + 2]
-                appendPixel(red: red, green: green, blue: blue, format: pixelFormat, to: &output)
+                output += pixelFormat.pixelBytes(red: red, green: green, blue: blue)
             }
         }
 
         return output
-    }
-
-    private static func appendPixel(red: UInt8, green: UInt8, blue: UInt8, format: PixelFormat, to output: inout [UInt8]) {
-        let redValue = scaled(UInt32(red), max: UInt32(format.redMax)) << UInt32(format.redShift)
-        let greenValue = scaled(UInt32(green), max: UInt32(format.greenMax)) << UInt32(format.greenShift)
-        let blueValue = scaled(UInt32(blue), max: UInt32(format.blueMax)) << UInt32(format.blueShift)
-        let pixel = redValue | greenValue | blueValue
-
-        switch format.bitsPerPixel {
-        case 32:
-            appendInteger(pixel, byteCount: 4, bigEndian: format.bigEndian, to: &output)
-        case 16:
-            appendInteger(pixel, byteCount: 2, bigEndian: format.bigEndian, to: &output)
-        default:
-            output.append(UInt8(pixel & 0xff))
-        }
-    }
-
-    private static func appendInteger(_ value: UInt32, byteCount: Int, bigEndian: Bool, to output: inout [UInt8]) {
-        let indices = bigEndian ? Array((0..<byteCount).reversed()) : Array(0..<byteCount)
-        for index in indices {
-            output.append(UInt8((value >> UInt32(index * 8)) & 0xff))
-        }
-    }
-
-    private static func scaled(_ component: UInt32, max: UInt32) -> UInt32 {
-        guard max != 255 else {
-            return component
-        }
-        return (component * max) / 255
     }
 
     private static func hasChanges(rect: Rect, current: Framebuffer, previous: Framebuffer) -> Bool {

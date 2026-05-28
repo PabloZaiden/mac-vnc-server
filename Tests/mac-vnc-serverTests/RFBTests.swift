@@ -20,6 +20,30 @@ import zlib
     #expect(bytes == [0x33, 0x22, 0x11, 0x00])
 }
 
+@Test func rawEncodingHonorsClientRequestedColorShifts() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 1, height: 1)
+    let framebuffer = Framebuffer(width: 1, height: 1, bgra: [0x33, 0x22, 0x11, 0xff], layout: layout)
+    let noVNCFormat = PixelFormat(
+        bitsPerPixel: 32,
+        depth: 24,
+        bigEndian: false,
+        trueColor: true,
+        redMax: 255,
+        greenMax: 255,
+        blueMax: 255,
+        redShift: 0,
+        greenShift: 8,
+        blueShift: 16
+    )
+    let bytes = try RawEncoding.encode(
+        rect: Rect(x: 0, y: 0, width: 1, height: 1),
+        framebuffer: framebuffer,
+        pixelFormat: noVNCFormat
+    )
+
+    #expect(bytes == [0x11, 0x22, 0x33, 0x00])
+}
+
 @Test func incrementalRawEncodingReturnsChangedTilesOnly() {
     let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
     let previous = Framebuffer(width: 2, height: 1, bgra: [
@@ -110,6 +134,50 @@ import zlib
 
     #expect(status == Z_OK)
     #expect(decompressed == [0, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04])
+}
+
+@Test func zrleEncodingHonorsClientRequestedColorShifts() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 1, height: 1)
+    let framebuffer = Framebuffer(width: 1, height: 1, bgra: [0x30, 0x20, 0x10, 0xff], layout: layout)
+    let noVNCFormat = PixelFormat(
+        bitsPerPixel: 32,
+        depth: 24,
+        bigEndian: false,
+        trueColor: true,
+        redMax: 255,
+        greenMax: 255,
+        blueMax: 255,
+        redShift: 0,
+        greenShift: 8,
+        blueShift: 16
+    )
+    let encoder = try ZRLEEncoder()
+    let payload = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 1, height: 1),
+        framebuffer: framebuffer,
+        pixelFormat: noVNCFormat
+    )
+
+    let compressedLength = Int(UInt32.be(payload[0], payload[1], payload[2], payload[3]))
+    var stream = z_stream()
+    #expect(inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
+    defer { inflateEnd(&stream) }
+
+    var compressed = Array(payload.dropFirst(4))
+    var decompressed = [UInt8](repeating: 0, count: 4)
+    let decompressedCount = decompressed.count
+    let status = compressed.withUnsafeMutableBytes { inputPointer in
+        decompressed.withUnsafeMutableBytes { outputPointer in
+            stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
+            stream.avail_in = uInt(compressedLength)
+            stream.next_out = outputPointer.bindMemory(to: Bytef.self).baseAddress
+            stream.avail_out = uInt(decompressedCount)
+            return inflate(&stream, Z_SYNC_FLUSH)
+        }
+    }
+
+    #expect(status == Z_OK)
+    #expect(decompressed == [0, 0x10, 0x20, 0x30])
 }
 
 @Test func zrleUsesFourByteCPixelsForDepth32Format() throws {

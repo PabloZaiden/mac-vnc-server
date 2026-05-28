@@ -80,6 +80,55 @@ struct PixelFormat: Equatable {
             0
         ]
     }
+
+    func pixelBytes(red: UInt8, green: UInt8, blue: UInt8) -> [UInt8] {
+        let pixel = packedPixel(red: red, green: green, blue: blue)
+        return integerBytes(pixel, byteCount: Int(bitsPerPixel / 8))
+    }
+
+    func cPixelBytes(red: UInt8, green: UInt8, blue: UInt8) -> [UInt8] {
+        let bytes = pixelBytes(red: red, green: green, blue: blue)
+        guard usesThreeByteCPixel else {
+            return bytes
+        }
+        return bigEndian ? Array(bytes.dropFirst()) : Array(bytes.dropLast())
+    }
+
+    var cPixelByteCount: Int {
+        usesThreeByteCPixel ? 3 : Int(bitsPerPixel / 8)
+    }
+
+    private var usesThreeByteCPixel: Bool {
+        bitsPerPixel == 32
+            && depth <= 24
+            && redMax <= 255
+            && greenMax <= 255
+            && blueMax <= 255
+            && redShift < 24
+            && greenShift < 24
+            && blueShift < 24
+    }
+
+    private func packedPixel(red: UInt8, green: UInt8, blue: UInt8) -> UInt32 {
+        let redValue = scaled(UInt32(red), max: UInt32(redMax)) << UInt32(redShift)
+        let greenValue = scaled(UInt32(green), max: UInt32(greenMax)) << UInt32(greenShift)
+        let blueValue = scaled(UInt32(blue), max: UInt32(blueMax)) << UInt32(blueShift)
+        return redValue | greenValue | blueValue
+    }
+
+    private func integerBytes(_ value: UInt32, byteCount: Int) -> [UInt8] {
+        let indices = bigEndian ? Array((0..<byteCount).reversed()) : Array(0..<byteCount)
+        return indices.map { index in
+            UInt8((value >> UInt32(index * 8)) & 0xff)
+        }
+    }
+
+    private func scaled(_ component: UInt32, max: UInt32) -> UInt32 {
+        guard max != 255 else {
+            return component
+        }
+        return (component * max) / 255
+    }
 }
 
 struct Framebuffer {
