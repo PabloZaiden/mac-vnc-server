@@ -218,7 +218,8 @@ enum CLI {
 
     static func errorMessage(for error: Error) -> String {
         var message = error.localizedDescription
-        if message.contains("ScreenCaptureKit found no displays") {
+        if case RFBError.captureFailed(let captureMessage) = error,
+           captureMessage == "ScreenCaptureKit found no displays" {
             message += "\nHint: run 'mac-vnc-server wakeup' to wake the display, then start the server again."
         }
         return message

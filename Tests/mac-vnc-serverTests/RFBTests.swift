@@ -4,10 +4,13 @@ import zlib
 @testable import mac_vnc_server
 
 @Test func cliParsesWakeupCommand() throws {
-    guard case .wakeup = try CLI.parse(arguments: ["wakeup"]) else {
-        Issue.record("Expected wakeup command")
-        return
+    let isWakeupCommand = if case .wakeup = try CLI.parse(arguments: ["wakeup"]) {
+        true
+    } else {
+        false
     }
+
+    #expect(isWakeupCommand)
 }
 
 @Test func noDisplaysErrorSuggestsWakeupCommand() {
