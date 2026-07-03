@@ -3,6 +3,22 @@ import Testing
 import zlib
 @testable import mac_vnc_server
 
+@Test func cliParsesWakeupCommand() throws {
+    let isWakeupCommand = if case .wakeup = try CLI.parse(arguments: ["wakeup"]) {
+        true
+    } else {
+        false
+    }
+
+    #expect(isWakeupCommand)
+}
+
+@Test func noDisplaysErrorSuggestsWakeupCommand() {
+    let message = CLI.errorMessage(for: RFBError.captureFailed("ScreenCaptureKit found no displays"))
+
+    #expect(message.contains("mac-vnc-server wakeup"))
+}
+
 @Test func pixelFormatRoundTrip() throws {
     let format = PixelFormat.serverDefault
     #expect(try PixelFormat(bytes: format.bytes) == format)
