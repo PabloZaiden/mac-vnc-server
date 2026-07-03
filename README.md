@@ -85,6 +85,12 @@ Check current status:
 ./.build/release/mac-vnc-server diagnose
 ```
 
+If ScreenCaptureKit reports no displays after the Mac turns the screen off, wake the display and start the server again:
+
+```sh
+./.build/release/mac-vnc-server wakeup
+```
+
 ## Run locally
 
 Default command:
@@ -164,11 +170,13 @@ open 'vnc://127.0.0.1:5900'
 mac-vnc-server [run] [options]
 mac-vnc-server permissions
 mac-vnc-server diagnose
+mac-vnc-server wakeup
 mac-vnc-server version
 mac-vnc-server --help
 ```
 
 `run` is optional when the first argument is a flag.
+`wakeup` sends a short user-activity assertion with `caffeinate` to wake the display when ScreenCaptureKit cannot see any displays.
 
 Options:
 

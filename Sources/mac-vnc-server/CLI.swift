@@ -3,12 +3,15 @@ import Foundation
 enum CLIError: LocalizedError {
     case helpRequested(String)
     case invalidArgument(String)
+    case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .helpRequested:
             return nil
         case .invalidArgument(let message):
+            return message
+        case .commandFailed(let message):
             return message
         }
     }
@@ -18,6 +21,7 @@ enum CLICommand {
     case run(ServerConfig)
     case permissions
     case diagnose
+    case wakeup
     case version
 
     func run() async throws {
@@ -29,6 +33,8 @@ enum CLICommand {
         case .diagnose:
             Permissions.printStatus()
             MacScreenCapture.printDisplayDiagnostics()
+        case .wakeup:
+            try DisplayWakeup.run()
         case .version:
             print("mac-vnc-server \(AppVersion.current)")
         }
@@ -46,7 +52,7 @@ enum CLICommand {
                 do {
                     try await Self.runServer(config: config)
                 } catch {
-                    fputs("mac-vnc-server \(config.bindAddress):\(config.port): \(error.localizedDescription)\n", stderr)
+                    fputs("mac-vnc-server \(config.bindAddress):\(config.port): \(CLI.errorMessage(for: error))\n", stderr)
                     Foundation.exit(1)
                 }
             }
@@ -103,6 +109,8 @@ enum CLI {
             return .permissions
         case "diagnose":
             return .diagnose
+        case "wakeup":
+            return .wakeup
         case "version", "--version", "-V":
             return .version
         case "-h", "--help", "help":
@@ -208,6 +216,14 @@ enum CLI {
         address == "127.0.0.1" || address.hasPrefix("127.")
     }
 
+    static func errorMessage(for error: Error) -> String {
+        var message = error.localizedDescription
+        if message.contains("ScreenCaptureKit found no displays") {
+            message += "\nHint: run 'mac-vnc-server wakeup' to wake the display, then start the server again."
+        }
+        return message
+    }
+
     static let helpText = """
     mac-vnc-server \(AppVersion.current)
 
@@ -217,6 +233,7 @@ enum CLI {
                           [--display all|number]
       mac-vnc-server permissions
       mac-vnc-server diagnose
+      mac-vnc-server wakeup
       mac-vnc-server version
 
     Default bind address is 127.0.0.1, default port is 5900, and default password is macvnc.
@@ -224,6 +241,23 @@ enum CLI {
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
+}
+
+enum DisplayWakeup {
+    static func run() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        process.arguments = ["-u", "-t", "5"]
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw CLIError.commandFailed("caffeinate failed with exit status \(process.terminationStatus)")
+        }
+
+        print("Sent display wake signal with caffeinate.")
+    }
 }
 
 private extension ServerConfig {

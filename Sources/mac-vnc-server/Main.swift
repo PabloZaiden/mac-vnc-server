@@ -11,7 +11,7 @@ struct MacVNCServerApp {
         } catch CLIError.helpRequested(let text) {
             print(text)
         } catch {
-            fputs("mac-vnc-server: \(error.localizedDescription)\n", stderr)
+            fputs("mac-vnc-server: \(CLI.errorMessage(for: error))\n", stderr)
             Foundation.exit(1)
         }
     }
