@@ -242,7 +242,7 @@ Apple Screen Sharing negotiates RFB 3.3 and requires VNC auth, so the default pa
 
 Screen capture uses `ScreenCaptureKit` with one stream per selected display. Captured frames are stored in BGRA format and composed into a virtual framebuffer. The virtual framebuffer supports multiple displays and maps VNC coordinates back to macOS global coordinates for mouse input.
 
-If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification` or when an active `SCStream` reports `didStopWithError`. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
+If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification`, when an active `SCStream` reports `didStopWithError`, or when input arrives after a failed recovery. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
 
 ### Encodings
 
@@ -322,7 +322,7 @@ Use the default encoding first:
 ./.build/release/mac-vnc-server --encoding auto
 ```
 
-If the display slept while the server was running, wait briefly for the automatic ScreenCaptureKit recovery. The server logs `ScreenCaptureKit: capture recovered` when the streams are available again. If the server was started while the display was already asleep, run `mac-vnc-server wakeup` and start it again.
+If the display slept while the server was running, wait briefly for the automatic ScreenCaptureKit recovery. If the display is still unavailable, the next keyboard or mouse event triggers another asynchronous recovery attempt. The server logs `ScreenCaptureKit: capture recovered` when the streams are available again. If the server was started while the display was already asleep, run `mac-vnc-server wakeup` and start it again.
 
 If testing a generic client, try:
 
