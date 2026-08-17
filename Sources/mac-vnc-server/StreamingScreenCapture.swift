@@ -59,10 +59,13 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
     }
 
     func capture() throws -> Framebuffer {
+        try currentStore().snapshot()
+    }
+
+    private func currentStore() -> StreamingFrameStore {
         stateLock.lock()
-        let currentStore = store
-        stateLock.unlock()
-        return try currentStore.snapshot()
+        defer { stateLock.unlock() }
+        return store
     }
 
     static func displayCount() async throws -> Int {
