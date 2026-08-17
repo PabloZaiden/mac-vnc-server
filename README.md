@@ -242,7 +242,7 @@ Apple Screen Sharing negotiates RFB 3.3 and requires VNC auth, so the default pa
 
 Screen capture uses `ScreenCaptureKit` with one stream per selected display. Captured frames are stored in BGRA format and composed into a virtual framebuffer. The virtual framebuffer supports multiple displays and maps VNC coordinates back to macOS global coordinates for mouse input.
 
-If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification` (and after an explicit `SCStream` stop). Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
+If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification` or when an active `SCStream` reports `didStopWithError`. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
 
 ### Encodings
 

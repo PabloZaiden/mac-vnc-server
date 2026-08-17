@@ -42,7 +42,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
         streams = started.streams
         outputs = started.outputs
         delegates = started.delegates
-        eventSink.owner = self
+        eventSink.attach(owner: self)
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.screensDidWakeNotification,
             object: nil,
@@ -59,10 +59,13 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
     }
 
     func capture() throws -> Framebuffer {
+        try currentStore().snapshot()
+    }
+
+    private func currentStore() -> StreamingFrameStore {
         stateLock.lock()
-        let currentStore = store
-        stateLock.unlock()
-        return try currentStore.snapshot()
+        defer { stateLock.unlock() }
+        return store
     }
 
     static func displayCount() async throws -> Int {
@@ -203,7 +206,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
         return streams
     }
 
-    fileprivate func streamDidStop(_ stream: SCStream, error: Error) {
+    fileprivate func streamDidStop(_ stream: SCStream, reason: String) {
         stateLock.lock()
         let isCurrentStream = streams.contains { $0 === stream }
         stateLock.unlock()
@@ -211,7 +214,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
         guard isCurrentStream else {
             return
         }
-        scheduleRecovery(reason: "stream stopped: \(error.localizedDescription)")
+        scheduleRecovery(reason: "stream stopped: \(reason)")
     }
 
     private func install(_ started: StartedCapture) {
@@ -275,10 +278,34 @@ private struct StartedCapture {
 }
 
 private final class StreamEventSink: @unchecked Sendable {
-    weak var owner: StreamingScreenCapture?
+    private let lock = NSLock()
+    private weak var owner: StreamingScreenCapture?
+    private var pendingEvents: [(stream: SCStream, reason: String)] = []
+
+    func attach(owner: StreamingScreenCapture) {
+        lock.lock()
+        self.owner = owner
+        let pendingEvents = pendingEvents
+        self.pendingEvents.removeAll(keepingCapacity: true)
+        lock.unlock()
+
+        for event in pendingEvents {
+            owner.streamDidStop(event.stream, reason: event.reason)
+        }
+    }
 
     func streamDidStop(_ stream: SCStream, error: Error) {
-        owner?.streamDidStop(stream, error: error)
+        let reason = error.localizedDescription
+
+        lock.lock()
+        guard let owner else {
+            pendingEvents.append((stream: stream, reason: reason))
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        owner.streamDidStop(stream, reason: reason)
     }
 }
 
