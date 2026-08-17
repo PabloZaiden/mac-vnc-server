@@ -439,6 +439,7 @@ final class RFBClientSession: @unchecked Sendable {
         state.lock()
         let mapAltToCommand = isAppleScreenSharingClient
         state.unlock()
+        requestCaptureRecoveryAfterInput()
         input.key(down: down, keysym: keysym, mapAltToCommand: mapAltToCommand)
     }
 
@@ -450,7 +451,12 @@ final class RFBClientSession: @unchecked Sendable {
         state.lock()
         let layout = currentLayout
         state.unlock()
+        requestCaptureRecoveryAfterInput()
         input.pointer(buttonMask: mask, x: x, y: y, layout: layout)
+    }
+
+    private func requestCaptureRecoveryAfterInput() {
+        (capture as? InputRecoverySource)?.requestRecoveryAfterInput()
     }
 
     private func handleClientCutText() throws {

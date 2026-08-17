@@ -5,7 +5,7 @@ import AppKit
 import Foundation
 import ScreenCaptureKit
 
-final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
+final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, InputRecoverySource {
     private let scale: CGFloat
     private let fps: Int
     private let displaySelection: DisplaySelection
@@ -18,6 +18,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
     private var delegates: [ScreenCaptureStreamDelegate]
     private var wakeObserver: NSObjectProtocol?
     private var recoveryScheduled = false
+    private var recoveryNeeded = false
 
     init(scale: Double, fps: Int, displaySelection: DisplaySelection) async throws {
         self.scale = CGFloat(scale)
@@ -60,6 +61,17 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
 
     func capture() throws -> Framebuffer {
         try currentStore().snapshot()
+    }
+
+    func requestRecoveryAfterInput() {
+        recoveryLock.lock()
+        let needed = recoveryNeeded
+        recoveryLock.unlock()
+
+        guard needed else {
+            return
+        }
+        scheduleRecovery(reason: "input received")
     }
 
     private func currentStore() -> StreamingFrameStore {
@@ -136,6 +148,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
 
     private func scheduleRecovery(reason: String) {
         recoveryLock.lock()
+        recoveryNeeded = true
         guard !recoveryScheduled else {
             recoveryLock.unlock()
             return
@@ -182,6 +195,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
                 }
 
                 install(started)
+                clearRecoveryNeeded()
 
                 print("ScreenCaptureKit: capture recovered")
                 return
@@ -229,6 +243,12 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource {
     private func finishRecoveryScheduling() {
         recoveryLock.lock()
         recoveryScheduled = false
+        recoveryLock.unlock()
+    }
+
+    private func clearRecoveryNeeded() {
+        recoveryLock.lock()
+        recoveryNeeded = false
         recoveryLock.unlock()
     }
 
