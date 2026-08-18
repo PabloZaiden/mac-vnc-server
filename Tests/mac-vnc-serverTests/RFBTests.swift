@@ -13,6 +13,36 @@ import zlib
     #expect(isWakeupCommand)
 }
 
+@Test func cliParsesVerboseRunFlag() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--verbose"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.verbose)
+}
+
+@Test func cliParsesUpdateCommand() throws {
+    guard case .update = try CLI.parse(arguments: ["update"]) else {
+        Issue.record("expected update command")
+        return
+    }
+}
+
+@Test func semanticVersionsTreatDevelopmentBuildAsOlderThanRelease() {
+    guard let development = SemanticVersion("0.0.0-development"),
+          let release = SemanticVersion("v0.2.5"),
+          let olderRelease = SemanticVersion("0.2.4"),
+          let sameRelease = SemanticVersion("0.2.5") else {
+        Issue.record("expected valid semantic versions")
+        return
+    }
+
+    #expect(development < release)
+    #expect(olderRelease < release)
+    #expect(release == sameRelease)
+}
+
 @Test func noDisplaysErrorSuggestsWakeupCommand() {
     let message = CLI.errorMessage(for: RFBError.captureFailed("ScreenCaptureKit found no displays"))
 
