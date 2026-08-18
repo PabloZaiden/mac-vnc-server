@@ -279,7 +279,7 @@ For Apple Screen Sharing, `Alt_L` / `Alt_R` keysyms are remapped to macOS Comman
 Clipboard synchronization is disabled by default because the native macOS Screen Sharing client can apply incoming clipboard updates to the client's local pasteboard. Enable basic text synchronization explicitly when it is needed:
 
 ```sh
-./.build/release/mac-vnc-server --clipboard-sync
+./.build/release/mac-vnc-server run --clipboard-sync
 ```
 
 This uses `NSPasteboard` and classic VNC cut text messages; full extended clipboard support is not implemented yet.
