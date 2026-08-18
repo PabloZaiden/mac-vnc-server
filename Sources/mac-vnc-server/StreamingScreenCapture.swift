@@ -9,6 +9,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
     private let scale: CGFloat
     private let fps: Int
     private let displaySelection: DisplaySelection
+    private let logger: ServerLogger
     private let streamEventSink: StreamEventSink
     private let stateLock = NSLock()
     private let recoveryLock = NSLock()
@@ -20,21 +21,28 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
     private var recoveryScheduled = false
     private var recoveryNeeded = false
 
-    init(scale: Double, fps: Int, displaySelection: DisplaySelection) async throws {
+    init(
+        scale: Double,
+        fps: Int,
+        displaySelection: DisplaySelection,
+        logger: ServerLogger
+    ) async throws {
         self.scale = CGFloat(scale)
         self.fps = fps
         self.displaySelection = displaySelection
+        self.logger = logger
 
         let eventSink = StreamEventSink()
         let started = try await Self.start(
             scale: self.scale,
             fps: fps,
             displaySelection: displaySelection,
-            eventSink: eventSink
+            eventSink: eventSink,
+            logger: logger
         )
 
         guard started.store.waitForFirstFrames(timeout: 5) else {
-            await Self.stopStreams(started.streams)
+            await Self.stopStreams(started.streams, logger: logger)
             throw RFBError.captureFailed("ScreenCaptureKit did not produce frames; check Screen Recording permission")
         }
 
@@ -89,7 +97,8 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         scale: CGFloat,
         fps: Int,
         displaySelection: DisplaySelection,
-        eventSink: StreamEventSink
+        eventSink: StreamEventSink,
+        logger: ServerLogger
     ) async throws -> StartedCapture {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let selectedDisplays = try selectDisplays(from: orderedDisplays(content.displays), displaySelection: displaySelection)
@@ -139,7 +148,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
                 try await stream.startCapture()
             }
         } catch {
-            await stopStreams(streams)
+            await stopStreams(streams, logger: logger)
             throw error
         }
 
@@ -167,7 +176,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
             } catch is CancellationError {
                 // The capture owner is shutting down.
             } catch {
-                fputs("ScreenCaptureKit recovery failed: \(error.localizedDescription)\n", stderr)
+                logger.error("ScreenCaptureKit recovery failed: \(error.localizedDescription)")
             }
 
             finishRecoveryScheduling()
@@ -175,10 +184,10 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
     }
 
     private func restartCapture(reason: String) async throws {
-        print("ScreenCaptureKit: rebuilding capture after \(reason)")
+        logger.info("ScreenCaptureKit: rebuilding capture after \(reason)")
 
         let oldStreams = currentStreams()
-        await Self.stopStreams(oldStreams)
+        await Self.stopStreams(oldStreams, logger: logger)
 
         var lastError: Error?
         for attempt in 1...3 {
@@ -187,24 +196,22 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
                     scale: scale,
                     fps: fps,
                     displaySelection: displaySelection,
-                    eventSink: streamEventSink
+                    eventSink: streamEventSink,
+                    logger: logger
                 )
                 guard started.store.waitForFirstFrames(timeout: 5) else {
-                    await Self.stopStreams(started.streams)
+                    await Self.stopStreams(started.streams, logger: logger)
                     throw RFBError.captureFailed("ScreenCaptureKit did not produce frames during recovery")
                 }
 
                 install(started)
                 clearRecoveryNeeded()
 
-                print("ScreenCaptureKit: capture recovered")
+                logger.info("ScreenCaptureKit: capture recovered")
                 return
             } catch {
                 lastError = error
-                fputs(
-                    "ScreenCaptureKit recovery attempt \(attempt)/3 failed: \(error.localizedDescription)\n",
-                    stderr
-                )
+                logger.warning("ScreenCaptureKit recovery attempt \(attempt)/3 failed: \(error.localizedDescription)")
                 if attempt < 3 {
                     try await Task.sleep(for: .seconds(1))
                 }
@@ -252,12 +259,12 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         recoveryLock.unlock()
     }
 
-    private static func stopStreams(_ streams: [SCStream]) async {
+    private static func stopStreams(_ streams: [SCStream], logger: ServerLogger) async {
         for stream in streams {
             do {
                 try await stream.stopCapture()
             } catch {
-                fputs("ScreenCaptureKit stream stop failed: \(error.localizedDescription)\n", stderr)
+                logger.warning("ScreenCaptureKit stream stop failed: \(error.localizedDescription)")
             }
         }
     }

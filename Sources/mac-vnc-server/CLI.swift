@@ -22,6 +22,7 @@ enum CLICommand {
     case permissions
     case diagnose
     case wakeup
+    case update
     case version
 
     func run() async throws {
@@ -35,6 +36,8 @@ enum CLICommand {
             MacScreenCapture.printDisplayDiagnostics()
         case .wakeup:
             try DisplayWakeup.run()
+        case .update:
+            try await BinaryUpdater.run()
         case .version:
             print("mac-vnc-server \(AppVersion.current)")
         }
@@ -84,10 +87,22 @@ enum CLICommand {
     }
 
     private static func runServer(config: ServerConfig) async throws {
-        let capture = try await StreamingScreenCapture(scale: config.scale, fps: config.fps, displaySelection: config.displaySelection)
+        let logger = ServerLogger(verbose: config.verbose)
+        let capture = try await StreamingScreenCapture(
+            scale: config.scale,
+            fps: config.fps,
+            displaySelection: config.displaySelection,
+            logger: logger
+        )
         let input = MacInputController()
         let clipboard = MacClipboard()
-        let server = RFBServer(config: config, capture: capture, input: input, clipboard: clipboard)
+        let server = RFBServer(
+            config: config,
+            capture: capture,
+            input: input,
+            clipboard: clipboard,
+            logger: logger
+        )
         try server.run()
     }
 }
@@ -111,6 +126,8 @@ enum CLI {
             return .diagnose
         case "wakeup":
             return .wakeup
+        case "update":
+            return .update
         case "version", "--version", "-V":
             return .version
         case "-h", "--help", "help":
@@ -129,6 +146,7 @@ enum CLI {
         var scale: Double = 1
         var encodingPreference = EncodingPreference.auto
         var displaySelection = DisplaySelection.automatic
+        var verbose = false
         var index = 0
 
         while index < arguments.count {
@@ -186,6 +204,8 @@ enum CLI {
                 } else {
                     throw CLIError.invalidArgument("--display requires all or a 1-based display number")
                 }
+            case "--verbose":
+                verbose = true
             case "--help", "-h":
                 throw CLIError.helpRequested(helpText)
             default:
@@ -208,7 +228,8 @@ enum CLI {
             fps: fps,
             scale: scale,
             encodingPreference: encodingPreference,
-            displaySelection: displaySelection
+            displaySelection: displaySelection,
+            verbose: verbose
         )
     }
 
@@ -231,15 +252,17 @@ enum CLI {
     Usage:
       mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps 30] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
-                          [--display all|number]
+                          [--display all|number] [--verbose]
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server wakeup
+      mac-vnc-server update
       mac-vnc-server version
 
     Default bind address is 127.0.0.1, default port is 5900, and default password is macvnc.
     Without --display, port 5900 serves all displays and 5901, 5902, ... serve each display.
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
+    Use --verbose to enable informational server logs.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
@@ -270,7 +293,8 @@ private extension ServerConfig {
             fps: fps,
             scale: scale,
             encodingPreference: encodingPreference,
-            displaySelection: displaySelection
+            displaySelection: displaySelection,
+            verbose: verbose
         )
     }
 }

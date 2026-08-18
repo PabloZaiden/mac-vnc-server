@@ -62,7 +62,15 @@ Show the version:
 ./.build/release/mac-vnc-server --help
 ```
 
-The server also prints its version at startup.
+Informational startup and framebuffer-update logs are shown only when the server is started with `--verbose`. Warnings and errors are always written to stderr.
+
+Update an existing binary from the latest GitHub release:
+
+```sh
+./.build/release/mac-vnc-server update
+```
+
+The command downloads the exact release assets, verifies the binary's SHA-256 checksum, and atomically replaces the executable that was invoked. If a newer release was installed, restart the server process to use it.
 
 ## Permissions
 
@@ -171,6 +179,7 @@ mac-vnc-server [run] [options]
 mac-vnc-server permissions
 mac-vnc-server diagnose
 mac-vnc-server wakeup
+mac-vnc-server update
 mac-vnc-server version
 mac-vnc-server --help
 ```
@@ -191,6 +200,7 @@ Options:
 | `--scale <value>` | `1.0` | Virtual framebuffer scale. `1.0` is usually best for Retina/LAN performance. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
+| `--verbose` | off | Enable informational startup, connection, recovery, and periodic update logs on stdout. |
 
 ### Display modes
 

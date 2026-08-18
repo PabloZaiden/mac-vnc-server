@@ -8,6 +8,7 @@ struct ServerConfig {
     let scale: Double
     let encodingPreference: EncodingPreference
     let displaySelection: DisplaySelection
+    let verbose: Bool
 }
 
 enum DisplaySelection: Equatable {
@@ -34,25 +35,29 @@ final class RFBServer {
     private let capture: FramebufferSource
     private let input: InputController
     private let clipboard: ClipboardBridge
+    private let logger: ServerLogger
 
-    init(config: ServerConfig, capture: FramebufferSource, input: InputController, clipboard: ClipboardBridge) {
+    init(
+        config: ServerConfig,
+        capture: FramebufferSource,
+        input: InputController,
+        clipboard: ClipboardBridge,
+        logger: ServerLogger
+    ) {
         self.config = config
         self.capture = capture
         self.input = input
         self.clipboard = clipboard
+        self.logger = logger
     }
 
     func run() throws {
         let listener = try ListeningSocket(bindAddress: config.bindAddress, port: config.port)
-        print("mac-vnc-server \(AppVersion.current)")
-        print("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
-        print("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
-        if let password = config.password {
-            print("password=\(password)")
-        } else {
-            print("password=<none>")
-        }
-        print("Connect with vnc://\(config.bindAddress == "0.0.0.0" ? "127.0.0.1" : config.bindAddress):\(config.port)")
+        logger.info("mac-vnc-server \(AppVersion.current)")
+        logger.info("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
+        logger.info("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
+        logger.info("password configured: \(config.password != nil)")
+        logger.info("Connect with vnc://\(config.bindAddress == "0.0.0.0" ? "127.0.0.1" : config.bindAddress):\(config.port)")
 
         while true {
             let client = try listener.acceptClient()
@@ -64,10 +69,11 @@ final class RFBServer {
                     encodingPreference: config.encodingPreference,
                     capture: capture,
                     input: input,
-                    clipboard: clipboard
+                    clipboard: clipboard,
+                    logger: logger
                 ).run()
             } catch {
-                fputs("client disconnected: \(error.localizedDescription)\n", stderr)
+                logger.warning("client disconnected: \(error.localizedDescription)")
             }
         }
     }
@@ -99,6 +105,7 @@ final class RFBClientSession: @unchecked Sendable {
     private let capture: FramebufferSource
     private let input: InputController
     private let clipboard: ClipboardBridge
+    private let logger: ServerLogger
     private var pixelFormat = PixelFormat.serverDefault
     private var clientEncodings: [Int32] = [RFBEncoding.raw.rawValue]
     private var isAppleScreenSharingClient = false
@@ -123,7 +130,8 @@ final class RFBClientSession: @unchecked Sendable {
         encodingPreference: EncodingPreference,
         capture: FramebufferSource,
         input: InputController,
-        clipboard: ClipboardBridge
+        clipboard: ClipboardBridge,
+        logger: ServerLogger
     ) throws {
         self.socket = socket
         self.password = password
@@ -132,6 +140,7 @@ final class RFBClientSession: @unchecked Sendable {
         self.capture = capture
         self.input = input
         self.clipboard = clipboard
+        self.logger = logger
         zrleEncoder = try ZRLEEncoder()
         zlibEncoder = try ZlibEncoder()
     }
@@ -207,7 +216,7 @@ final class RFBClientSession: @unchecked Sendable {
 
         _ = try socket.readExact(1)
         try sendServerInit(framebuffer: initialFrame)
-        print("client connected: \(versionText), framebuffer \(initialFrame.width)x\(initialFrame.height)")
+        logger.info("client connected: \(versionText), framebuffer \(initialFrame.width)x\(initialFrame.height)")
     }
 
     private func authenticate(password: String) throws {
@@ -373,7 +382,7 @@ final class RFBClientSession: @unchecked Sendable {
         updatesSent += 1
         bytesSent += response.count
         if updatesSent == 1 || updatesSent % 60 == 0 {
-            print("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
+            logger.info("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
         }
         previousFramebuffer = framebuffer
         currentLayout = framebuffer.layout
