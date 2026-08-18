@@ -262,7 +262,7 @@ enum CLI {
     Default bind address is 127.0.0.1, default port is 5900, and default password is macvnc.
     Without --display, port 5900 serves all displays and 5901, 5902, ... serve each display.
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
-    Use --verbose to enable informational server logs.
+    Use --verbose to enable periodic framebuffer update logs.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }

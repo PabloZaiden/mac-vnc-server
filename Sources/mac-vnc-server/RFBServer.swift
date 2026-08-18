@@ -382,7 +382,7 @@ final class RFBClientSession: @unchecked Sendable {
         updatesSent += 1
         bytesSent += response.count
         if updatesSent == 1 || updatesSent % 60 == 0 {
-            logger.info("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
+            logger.verbose("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
         }
         previousFramebuffer = framebuffer
         currentLayout = framebuffer.layout

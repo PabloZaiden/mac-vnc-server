@@ -62,7 +62,7 @@ Show the version:
 ./.build/release/mac-vnc-server --help
 ```
 
-Informational startup and framebuffer-update logs are shown only when the server is started with `--verbose`. Warnings and errors are always written to stderr.
+Startup, connection, and recovery information is always shown. Periodic framebuffer-update logs are shown only when the server is started with `--verbose`. Warnings and errors are always written to stderr.
 
 Update an existing binary from the latest GitHub release:
 
@@ -200,7 +200,7 @@ Options:
 | `--scale <value>` | `1.0` | Virtual framebuffer scale. `1.0` is usually best for Retina/LAN performance. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
-| `--verbose` | off | Enable informational startup, connection, recovery, and periodic update logs on stdout. |
+| `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 
 ### Display modes
 

@@ -9,6 +9,10 @@ final class ServerLogger: @unchecked Sendable {
     }
 
     func info(_ message: String) {
+        write(message, to: stdout)
+    }
+
+    func verbose(_ message: String) {
         guard verbose else {
             return
         }
