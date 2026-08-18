@@ -332,7 +332,7 @@ Use the default encoding first:
 ./.build/release/mac-vnc-server --encoding auto
 ```
 
-If the display slept while the server was running, wait briefly for the automatic ScreenCaptureKit recovery. If the display is still unavailable, the next keyboard or mouse event triggers another asynchronous recovery attempt. The server logs `ScreenCaptureKit: capture recovered` when the streams are available again. If the server was started while the display was already asleep, run `mac-vnc-server wakeup` and start it again.
+If the display slept while the server was running, wait briefly for the automatic ScreenCaptureKit recovery. If the display is still unavailable, the next keyboard or mouse event sends a `caffeinate` wake signal and triggers another asynchronous recovery attempt. The server logs `ScreenCaptureKit: capture recovered` when the streams are available again. If the server was started while the display was already asleep, run `mac-vnc-server wakeup` and start it again.
 
 If testing a generic client, try:
 

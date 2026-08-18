@@ -269,6 +269,11 @@ enum CLI {
 
 enum DisplayWakeup {
     static func run() throws {
+        try signal()
+        print("Sent display wake signal with caffeinate.")
+    }
+
+    static func signal() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
         process.arguments = ["-u", "-t", "5"]
@@ -279,8 +284,6 @@ enum DisplayWakeup {
         guard process.terminationStatus == 0 else {
             throw CLIError.commandFailed("caffeinate failed with exit status \(process.terminationStatus)")
         }
-
-        print("Sent display wake signal with caffeinate.")
     }
 }
 

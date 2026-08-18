@@ -20,6 +20,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
     private var wakeObserver: NSObjectProtocol?
     private var recoveryScheduled = false
     private var recoveryNeeded = false
+    private var displayWakeScheduled = false
 
     init(
         scale: Double,
@@ -79,7 +80,38 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         guard needed else {
             return
         }
+        scheduleDisplayWakeup()
         scheduleRecovery(reason: "input received")
+    }
+
+    private func scheduleDisplayWakeup() {
+        recoveryLock.lock()
+        guard !displayWakeScheduled else {
+            recoveryLock.unlock()
+            return
+        }
+        displayWakeScheduled = true
+        recoveryLock.unlock()
+
+        Task.detached { [weak self] in
+            guard let self else {
+                return
+            }
+            defer { finishDisplayWakeup() }
+
+            do {
+                try DisplayWakeup.signal()
+                logger.info("Sent display wake signal after remote input.")
+            } catch {
+                logger.warning("display wake signal failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func finishDisplayWakeup() {
+        recoveryLock.lock()
+        displayWakeScheduled = false
+        recoveryLock.unlock()
     }
 
     private func currentStore() -> StreamingFrameStore {
