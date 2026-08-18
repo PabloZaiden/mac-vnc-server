@@ -201,6 +201,7 @@ Options:
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
+| `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
 
 ### Display modes
 
@@ -275,7 +276,13 @@ For Apple Screen Sharing, `Alt_L` / `Alt_R` keysyms are remapped to macOS Comman
 
 ### Clipboard
 
-Clipboard support uses `NSPasteboard` and classic VNC cut text messages. This path is basic text clipboard support; full extended clipboard support is not implemented yet.
+Clipboard synchronization is disabled by default because the native macOS Screen Sharing client can apply incoming clipboard updates to the client's local pasteboard. Enable basic text synchronization explicitly when it is needed:
+
+```sh
+./.build/release/mac-vnc-server --clipboard-sync
+```
+
+This uses `NSPasteboard` and classic VNC cut text messages; full extended clipboard support is not implemented yet.
 
 ## GitHub Actions
 
