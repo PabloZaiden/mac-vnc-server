@@ -235,11 +235,24 @@ enum BinaryUpdater {
     }
 
     private static func currentExecutableURL() throws -> URL {
-        guard let argument = CommandLine.arguments.first, !argument.isEmpty else {
+        var bufferSize: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &bufferSize)
+        guard bufferSize > 0 else {
             throw CLIError.commandFailed("could not determine the current executable path")
         }
-        let currentDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-        let url = URL(fileURLWithPath: argument, relativeTo: currentDirectory)
+
+        var buffer = [CChar](repeating: 0, count: Int(bufferSize))
+        let result = buffer.withUnsafeMutableBufferPointer { buffer in
+            _NSGetExecutablePath(buffer.baseAddress, &bufferSize)
+        }
+        guard result == 0 else {
+            throw CLIError.commandFailed("could not determine the current executable path")
+        }
+
+        let path = buffer.withUnsafeBufferPointer { buffer in
+            String(cString: buffer.baseAddress!)
+        }
+        let url = URL(fileURLWithPath: path)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false
@@ -260,8 +273,13 @@ enum BinaryUpdater {
         do {
             try data.write(to: temporaryURL)
             try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: temporaryURL.path)
-            guard rename(temporaryURL.path, url.path) == 0 else {
-                throw CLIError.commandFailed("could not atomically replace \(url.path): \(String(cString: strerror(errno))))")
+            let renameResult = temporaryURL.path.withCString { temporaryPath in
+                url.path.withCString { destinationPath in
+                    Darwin.rename(temporaryPath, destinationPath)
+                }
+            }
+            guard renameResult == 0 else {
+                throw CLIError.commandFailed("could not atomically replace \(url.path): \(String(cString: strerror(errno)))")
             }
         } catch {
             try? fileManager.removeItem(at: temporaryURL)

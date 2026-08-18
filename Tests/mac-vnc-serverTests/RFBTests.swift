@@ -32,14 +32,15 @@ import zlib
 @Test func semanticVersionsTreatDevelopmentBuildAsOlderThanRelease() {
     guard let development = SemanticVersion("0.0.0-development"),
           let release = SemanticVersion("v0.2.5"),
-          let olderRelease = SemanticVersion("0.2.4") else {
+          let olderRelease = SemanticVersion("0.2.4"),
+          let sameRelease = SemanticVersion("0.2.5") else {
         Issue.record("expected valid semantic versions")
         return
     }
 
     #expect(development < release)
     #expect(olderRelease < release)
-    #expect(release == SemanticVersion("0.2.5"))
+    #expect(release == sameRelease)
 }
 
 @Test func noDisplaysErrorSuggestsWakeupCommand() {

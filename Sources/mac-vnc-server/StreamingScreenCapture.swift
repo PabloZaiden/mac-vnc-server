@@ -97,13 +97,13 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
             guard let self else {
                 return
             }
-            defer { finishDisplayWakeup() }
+            defer { self.finishDisplayWakeup() }
 
             do {
                 try DisplayWakeup.signal()
-                logger.info("Sent display wake signal after remote input.")
+                self.logger.info("Sent display wake signal after remote input.")
             } catch {
-                logger.warning("display wake signal failed: \(error.localizedDescription)")
+                self.logger.warning("display wake signal failed: \(error.localizedDescription)")
             }
         }
     }
