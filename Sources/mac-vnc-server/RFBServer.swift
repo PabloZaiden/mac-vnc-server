@@ -9,6 +9,7 @@ struct ServerConfig {
     let encodingPreference: EncodingPreference
     let displaySelection: DisplaySelection
     let verbose: Bool
+    let clipboardSync: Bool
 }
 
 enum DisplaySelection: Equatable {
@@ -57,6 +58,7 @@ final class RFBServer {
         logger.info("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
         logger.info("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
         logger.info("password configured: \(config.password != nil)")
+        logger.info("clipboard sync: \(config.clipboardSync ? "enabled" : "disabled")")
         logger.info("Connect with vnc://\(config.bindAddress == "0.0.0.0" ? "127.0.0.1" : config.bindAddress):\(config.port)")
 
         while true {
@@ -70,6 +72,7 @@ final class RFBServer {
                     capture: capture,
                     input: input,
                     clipboard: clipboard,
+                    clipboardSync: config.clipboardSync,
                     logger: logger
                 ).run()
             } catch {
@@ -105,6 +108,7 @@ final class RFBClientSession: @unchecked Sendable {
     private let capture: FramebufferSource
     private let input: InputController
     private let clipboard: ClipboardBridge
+    private let clipboardSync: Bool
     private let logger: ServerLogger
     private var pixelFormat = PixelFormat.serverDefault
     private var clientEncodings: [Int32] = [RFBEncoding.raw.rawValue]
@@ -131,6 +135,7 @@ final class RFBClientSession: @unchecked Sendable {
         capture: FramebufferSource,
         input: InputController,
         clipboard: ClipboardBridge,
+        clipboardSync: Bool,
         logger: ServerLogger
     ) throws {
         self.socket = socket
@@ -140,6 +145,7 @@ final class RFBClientSession: @unchecked Sendable {
         self.capture = capture
         self.input = input
         self.clipboard = clipboard
+        self.clipboardSync = clipboardSync
         self.logger = logger
         zrleEncoder = try ZRLEEncoder()
         zlibEncoder = try ZlibEncoder()
@@ -389,7 +395,7 @@ final class RFBClientSession: @unchecked Sendable {
         hasSentFramebufferUpdate = true
         state.unlock()
 
-        if let text = clipboard.localTextIfChanged() {
+        if clipboardSync, let text = clipboard.localTextIfChanged() {
             try sendServerCutText(text)
         }
     }
@@ -473,8 +479,10 @@ final class RFBClientSession: @unchecked Sendable {
         let lengthBytes = try socket.readExact(4)
         let length = Int(UInt32.be(lengthBytes[0], lengthBytes[1], lengthBytes[2], lengthBytes[3]))
         let bytes = try socket.readExact(length)
-        let text = String(decoding: bytes, as: UTF8.self)
-        clipboard.setRemoteText(text)
+        if clipboardSync {
+            let text = String(decoding: bytes, as: UTF8.self)
+            clipboard.setRemoteText(text)
+        }
     }
 
     private func sendServerCutText(_ text: String) throws {

@@ -22,6 +22,24 @@ import zlib
     #expect(config.verbose)
 }
 
+@Test func cliDisablesClipboardSyncByDefault() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(!config.clipboardSync)
+}
+
+@Test func cliParsesClipboardSyncFlag() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--clipboard-sync"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.clipboardSync)
+}
+
 @Test func cliParsesUpdateCommand() throws {
     guard case .update = try CLI.parse(arguments: ["update"]) else {
         Issue.record("expected update command")

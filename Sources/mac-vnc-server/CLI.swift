@@ -147,6 +147,7 @@ enum CLI {
         var encodingPreference = EncodingPreference.auto
         var displaySelection = DisplaySelection.automatic
         var verbose = false
+        var clipboardSync = false
         var index = 0
 
         while index < arguments.count {
@@ -206,6 +207,8 @@ enum CLI {
                 }
             case "--verbose":
                 verbose = true
+            case "--clipboard-sync":
+                clipboardSync = true
             case "--help", "-h":
                 throw CLIError.helpRequested(helpText)
             default:
@@ -229,7 +232,8 @@ enum CLI {
             scale: scale,
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
-            verbose: verbose
+            verbose: verbose,
+            clipboardSync: clipboardSync
         )
     }
 
@@ -252,7 +256,7 @@ enum CLI {
     Usage:
       mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps 30] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
-                          [--display all|number] [--verbose]
+                          [--display all|number] [--verbose] [--clipboard-sync]
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server wakeup
@@ -263,6 +267,7 @@ enum CLI {
     Without --display, port 5900 serves all displays and 5901, 5902, ... serve each display.
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
+    Use --clipboard-sync to enable basic text clipboard synchronization.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
@@ -297,7 +302,8 @@ private extension ServerConfig {
             scale: scale,
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
-            verbose: verbose
+            verbose: verbose,
+            clipboardSync: clipboardSync
         )
     }
 }
