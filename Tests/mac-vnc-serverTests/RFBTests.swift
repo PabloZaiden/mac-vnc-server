@@ -31,6 +31,58 @@ import zlib
     #expect(!config.clipboardSync)
 }
 
+@Test func cliDefaultsToAdaptiveFrameRate() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.fps == 60)
+    #expect(config.adaptiveFrameRate)
+}
+
+@Test func cliParsesFixedFrameRate() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--fps", "30"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.fps == 30)
+    #expect(!config.adaptiveFrameRate)
+}
+
+@Test func cliParsesAutoFrameRate() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--fps", "auto"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.fps == 60)
+    #expect(config.adaptiveFrameRate)
+}
+
+@Test func adaptiveFrameRateUses60To45To30WithHysteresis() {
+    var controller = AdaptiveFrameRateController()
+
+    for _ in 0..<5 {
+        #expect(controller.update(frameDuration: 0.020) == nil)
+    }
+    #expect(controller.update(frameDuration: 0.020) == 45)
+    #expect(controller.frameRate == 45)
+
+    for index in 0..<6 {
+        #expect(controller.update(frameDuration: 0.030) == (index == 5 ? 30 : nil))
+    }
+    #expect(controller.frameRate == 30)
+
+    for _ in 0..<89 {
+        #expect(controller.update(frameDuration: 0.010) == nil)
+    }
+    #expect(controller.update(frameDuration: 0.010) == 45)
+    #expect(controller.update(frameDuration: 0.010) == nil)
+    #expect(controller.frameRate == 45)
+}
+
 @Test func cliParsesClipboardSyncFlag() throws {
     guard case .run(let config) = try CLI.parse(arguments: ["run", "--clipboard-sync"]) else {
         Issue.record("expected run command")
@@ -47,6 +99,7 @@ import zlib
     }
 
     #expect(!config.adaptiveStreaming)
+    #expect(!config.adaptiveFrameRate)
 }
 
 @Test func cliParsesUpdateCommand() throws {

@@ -12,6 +12,7 @@ struct ServerConfig {
     let verbose: Bool
     let clipboardSync: Bool
     let adaptiveStreaming: Bool
+    let adaptiveFrameRate: Bool
 }
 
 enum DisplaySelection: Equatable {
@@ -58,7 +59,8 @@ final class RFBServer {
         let listener = try ListeningSocket(bindAddress: config.bindAddress, port: config.port)
         logger.info("mac-vnc-server \(AppVersion.current)")
         logger.info("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
-        logger.info("fps=\(config.fps) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
+        let fpsDescription = config.adaptiveFrameRate ? "auto(60-45-30)" : "\(config.fps)"
+        logger.info("fps=\(fpsDescription) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
         logger.info("password configured: \(config.password != nil)")
         logger.info("clipboard sync: \(config.clipboardSync ? "enabled" : "disabled")")
         logger.info("Connect with vnc://\(config.bindAddress == "0.0.0.0" ? "127.0.0.1" : config.bindAddress):\(config.port)")
@@ -76,6 +78,7 @@ final class RFBServer {
                     clipboard: clipboard,
                     clipboardSync: config.clipboardSync,
                     adaptiveStreaming: config.adaptiveStreaming,
+                    adaptiveFrameRate: config.adaptiveFrameRate,
                     logger: logger
                 ).run()
             } catch {
@@ -98,6 +101,57 @@ extension DisplaySelection {
     }
 }
 
+struct AdaptiveFrameRateController {
+    static let frameRates = [60, 45, 30]
+
+    private(set) var index = 0
+    private var slowFrameStreak = 0
+    private var fastFrameStreak = 0
+
+    var frameRate: Int {
+        Self.frameRates[index]
+    }
+
+    mutating func update(frameDuration: TimeInterval) -> Int? {
+        let target = 1.0 / Double(frameRate)
+        if frameDuration > target * 1.15 {
+            slowFrameStreak += 1
+            fastFrameStreak = 0
+            guard slowFrameStreak >= 6 else {
+                return nil
+            }
+
+            slowFrameStreak = 0
+            guard index + 1 < Self.frameRates.count else {
+                return nil
+            }
+
+            index += 1
+            return frameRate
+        }
+
+        guard frameDuration < target * 0.70 else {
+            slowFrameStreak = 0
+            fastFrameStreak = 0
+            return nil
+        }
+
+        fastFrameStreak += 1
+        slowFrameStreak = 0
+        guard fastFrameStreak >= 90 else {
+            return nil
+        }
+
+        fastFrameStreak = 0
+        guard index > 0 else {
+            return nil
+        }
+
+        index -= 1
+        return frameRate
+    }
+}
+
 final class RFBClientSession: @unchecked Sendable {
     private struct FramebufferUpdateRequest {
         let incremental: Bool
@@ -107,13 +161,14 @@ final class RFBClientSession: @unchecked Sendable {
     private let socket: ClientSocket
     private let password: String?
     private let minimumFrameInterval: TimeInterval
-    private let frameInterval: TimeInterval
+    private var frameInterval: TimeInterval
     private let encodingPreference: EncodingPreference
     private let capture: FramebufferSource
     private let input: InputController
     private let clipboard: ClipboardBridge
     private let clipboardSync: Bool
     private let adaptiveStreaming: Bool
+    private let adaptiveFrameRate: Bool
     private let logger: ServerLogger
     private var pixelFormat = PixelFormat.serverDefault
     private var clientEncodings: [Int32] = [RFBEncoding.raw.rawValue]
@@ -131,6 +186,7 @@ final class RFBClientSession: @unchecked Sendable {
     private var writerError: Error?
     private var updatesSent = 0
     private var bytesSent = 0
+    private var adaptiveFrameRateController = AdaptiveFrameRateController()
 
     init(
         socket: ClientSocket,
@@ -142,6 +198,7 @@ final class RFBClientSession: @unchecked Sendable {
         clipboard: ClipboardBridge,
         clipboardSync: Bool,
         adaptiveStreaming: Bool,
+        adaptiveFrameRate: Bool,
         logger: ServerLogger
     ) throws {
         self.socket = socket
@@ -154,6 +211,7 @@ final class RFBClientSession: @unchecked Sendable {
         self.clipboard = clipboard
         self.clipboardSync = clipboardSync
         self.adaptiveStreaming = adaptiveStreaming
+        self.adaptiveFrameRate = adaptiveFrameRate
         self.logger = logger
         zrleEncoder = try ZRLEEncoder()
         zlibEncoder = try ZlibEncoder()
@@ -468,6 +526,7 @@ final class RFBClientSession: @unchecked Sendable {
             writeDuration: writeDuration,
             encoding: encoding
         )
+        adaptFrameRate(frameDuration: frameDuration)
 
         if clipboardSync, let text = clipboard.localTextIfChanged() {
             try sendServerCutText(text)
@@ -531,7 +590,7 @@ final class RFBClientSession: @unchecked Sendable {
             return
         }
 
-        let target = minimumFrameInterval
+        let target = frameInterval
         guard encodeDuration > 0 else {
             return
         }
@@ -545,6 +604,19 @@ final class RFBClientSession: @unchecked Sendable {
             let level: Int32 = frameDuration > target * 2.5 ? 6 : 3
             try setCompressionLevel(level, for: encoding)
         }
+    }
+
+    private func adaptFrameRate(frameDuration: TimeInterval) {
+        guard adaptiveFrameRate else {
+            return
+        }
+
+        guard let frameRate = adaptiveFrameRateController.update(frameDuration: frameDuration) else {
+            return
+        }
+
+        frameInterval = 1.0 / Double(frameRate)
+        logger.verbose("adaptive fps changed to \(frameRate)")
     }
 
     private func elapsedSeconds(since start: UInt64) -> TimeInterval {

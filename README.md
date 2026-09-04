@@ -7,7 +7,7 @@ The default setup is optimized for local testing with Apple Screen Sharing:
 - bind address: `127.0.0.1`
 - base port: `5900`
 - password: `macvnc`
-- FPS target: `30`
+- FPS target: adaptive `60 -> 45 -> 30`
 - scale: `1.0`
 - encoding: `auto`
 
@@ -110,7 +110,7 @@ Default command:
 Equivalent explicit command:
 
 ```sh
-./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps 30 --scale 1 --encoding auto --password macvnc
+./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto --password macvnc
 ```
 
 By default, the server exposes both the combined desktop and each display individually:
@@ -196,13 +196,13 @@ Options:
 | `--password <value>` | `macvnc` | Classic VNC auth password. |
 | `--no-password` | off | Use unauthenticated VNC. Apple Screen Sharing does not accept this path. |
 | `--insecure-allow-no-auth` | off | Required with `--no-password` on non-loopback binds. |
-| `--fps <1...120>` | `30` | Target framebuffer update rate. |
+| `--fps <auto\|1...120>` | `auto` | Adaptive `60 -> 45 -> 30` target, or a fixed framebuffer update rate when an explicit number is provided. |
 | `--scale <value>` | `1.0` | Virtual framebuffer scale. `1.0` is usually best for Retina/LAN performance. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 | `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
-| `--no-adaptive` | off | Disable adaptive compression. By default, the server lowers compression when encoding dominates and raises it only when socket writes dominate. |
+| `--no-adaptive` | off | Disable adaptive FPS and compression. |
 
 ### Display modes
 
