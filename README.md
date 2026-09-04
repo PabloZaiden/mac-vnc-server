@@ -202,7 +202,7 @@ Options:
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 | `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
-| `--no-adaptive` | off | Disable adaptive frame pacing and compression. By default, the server slows updates and raises compression when capture, encoding, or socket writes cannot sustain the requested FPS. |
+| `--no-adaptive` | off | Disable adaptive compression. By default, the server lowers compression when encoding dominates and raises it only when socket writes dominate. |
 
 ### Display modes
 

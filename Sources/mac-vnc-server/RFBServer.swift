@@ -107,7 +107,7 @@ final class RFBClientSession: @unchecked Sendable {
     private let socket: ClientSocket
     private let password: String?
     private let minimumFrameInterval: TimeInterval
-    private var frameInterval: TimeInterval
+    private let frameInterval: TimeInterval
     private let encodingPreference: EncodingPreference
     private let capture: FramebufferSource
     private let input: InputController
@@ -131,7 +131,6 @@ final class RFBClientSession: @unchecked Sendable {
     private var writerError: Error?
     private var updatesSent = 0
     private var bytesSent = 0
-    private var fastUpdateCount = 0
 
     init(
         socket: ClientSocket,
@@ -371,12 +370,16 @@ final class RFBClientSession: @unchecked Sendable {
     private func sendFramebufferUpdate(_ request: FramebufferUpdateRequest) throws {
         throttleFrameRate()
         let frameStarted = Date()
+        let measureTimings = logger.isVerbose
 
+        let captureStarted = measureTimings ? Date() : .distantPast
         let framebuffer = try capture.capture()
+        let captureDuration = measureTimings ? Date().timeIntervalSince(captureStarted) : 0
         let requested = request.rect
         let (format, encoding, previous, sentBefore) = stateSnapshotForEncoding()
         let shouldDiff = sentBefore
             && request.incremental
+        let diffStarted = measureTimings ? Date() : .distantPast
         let dirtyRects: [Rect]?
         if shouldDiff,
            let previous,
@@ -402,12 +405,17 @@ final class RFBClientSession: @unchecked Sendable {
                 dirtyRects: dirtyRects
             )
         }
+        let diffDuration = measureTimings ? Date().timeIntervalSince(diffStarted) : 0
 
         let header = [0, 0] + UInt16(rects.count).beBytes
+        let writeStarted = DispatchTime.now().uptimeNanoseconds
         try socket.writeAll(header)
         var updateBytes = header.count
+        var encodeDuration = 0.0
+        var writeDuration = elapsedSeconds(since: writeStarted)
 
         for rect in rects {
+            let encodeStarted = DispatchTime.now().uptimeNanoseconds
             let payload: [UInt8]
             let encodingBytes = UInt32(bitPattern: encoding.rawValue).beBytes
             switch encoding {
@@ -418,6 +426,7 @@ final class RFBClientSession: @unchecked Sendable {
             case .raw:
                 payload = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
             }
+            encodeDuration += elapsedSeconds(since: encodeStarted)
 
             var rectResponse: [UInt8] = []
             rectResponse.reserveCapacity(12 + payload.count)
@@ -427,22 +436,38 @@ final class RFBClientSession: @unchecked Sendable {
             rectResponse += UInt16(rect.height).beBytes
             rectResponse += encodingBytes
             rectResponse += payload
+            let rectWriteStarted = DispatchTime.now().uptimeNanoseconds
             try socket.writeAll(rectResponse)
+            writeDuration += elapsedSeconds(since: rectWriteStarted)
             updateBytes += rectResponse.count
         }
 
+        let frameDuration = Date().timeIntervalSince(frameStarted)
         state.lock()
         updatesSent += 1
         bytesSent += updateBytes
-        if updatesSent == 1 || updatesSent % 60 == 0 {
-            logger.verbose("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
+        if measureTimings && (updatesSent == 1 || updatesSent % 60 == 0) {
+            logger.verbose(
+                "updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) " +
+                "bytes=\(updateBytes) total_bytes=\(bytesSent) " +
+                "frame_ms=\(Int(frameDuration * 1_000)) " +
+                "capture_ms=\(Int(captureDuration * 1_000)) " +
+                "diff_ms=\(Int(diffDuration * 1_000)) " +
+                "encode_ms=\(Int(encodeDuration * 1_000)) " +
+                "write_ms=\(Int(writeDuration * 1_000))"
+            )
         }
         previousFramebuffer = framebuffer
         currentLayout = framebuffer.layout
         hasSentFramebufferUpdate = true
         state.unlock()
 
-        try adaptStreaming(frameDuration: Date().timeIntervalSince(frameStarted), encoding: encoding)
+        try adaptStreaming(
+            frameDuration: frameDuration,
+            encodeDuration: encodeDuration,
+            writeDuration: writeDuration,
+            encoding: encoding
+        )
 
         if clipboardSync, let text = clipboard.localTextIfChanged() {
             try sendServerCutText(text)
@@ -496,36 +521,34 @@ final class RFBClientSession: @unchecked Sendable {
         lastFramebufferUpdate = Date()
     }
 
-    private func adaptStreaming(frameDuration: TimeInterval, encoding: RFBEncoding) throws {
+    private func adaptStreaming(
+        frameDuration: TimeInterval,
+        encodeDuration: TimeInterval,
+        writeDuration: TimeInterval,
+        encoding: RFBEncoding
+    ) throws {
         guard adaptiveStreaming else {
             return
         }
 
         let target = minimumFrameInterval
-        if frameDuration > target * 1.25 {
-            frameInterval = min(0.5, max(target, frameDuration * 1.1))
-            fastUpdateCount = 0
+        guard encodeDuration > 0 else {
+            return
+        }
+        guard frameDuration > target * 1.25 else {
+            return
+        }
 
+        if encodeDuration >= writeDuration {
+            try setCompressionLevel(1, for: encoding)
+        } else {
             let level: Int32 = frameDuration > target * 2.5 ? 6 : 3
             try setCompressionLevel(level, for: encoding)
-            return
         }
+    }
 
-        guard frameDuration < target * 0.75 else {
-            fastUpdateCount = 0
-            return
-        }
-
-        fastUpdateCount += 1
-        guard fastUpdateCount >= 30 else {
-            return
-        }
-
-        fastUpdateCount = 0
-        frameInterval = max(target, frameInterval * 0.9)
-        if frameInterval <= target * 1.05 {
-            try setCompressionLevel(1, for: encoding)
-        }
+    private func elapsedSeconds(since start: UInt64) -> TimeInterval {
+        TimeInterval(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
     }
 
     private func setCompressionLevel(_ level: Int32, for encoding: RFBEncoding) throws {

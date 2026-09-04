@@ -18,6 +18,7 @@ enum RawEncoding {
             return [clipped]
         }
 
+        let trustDirtyRects = shouldTrustDirtyRects(dirtyRects, within: clipped)
         var rects: [Rect] = []
         var activeRuns: [TileRunKey: Int] = [:]
         var y = clipped.y
@@ -29,7 +30,7 @@ enum RawEncoding {
                 let w = min(tileSize, clipped.x + clipped.width - x)
                 var run = Rect(x: x, y: y, width: w, height: h)
                 guard isDirtyCandidate(run, dirtyRects: dirtyRects),
-                      hasChanges(rect: run, current: current, previous: previous) else {
+                      trustDirtyRects || hasChanges(rect: run, current: current, previous: previous) else {
                     x += tileSize
                     continue
                 }
@@ -39,7 +40,7 @@ enum RawEncoding {
                     let nextWidth = min(tileSize, clipped.x + clipped.width - x)
                     let next = Rect(x: x, y: y, width: nextWidth, height: h)
                     guard isDirtyCandidate(next, dirtyRects: dirtyRects),
-                          hasChanges(rect: next, current: current, previous: previous) else {
+                          trustDirtyRects || hasChanges(rect: next, current: current, previous: previous) else {
                         break
                     }
                     run.width += next.width
@@ -71,6 +72,10 @@ enum RawEncoding {
             throw RFBError.unsupportedPixelFormat(pixelFormat)
         }
 
+        if pixelFormat == .serverDefault {
+            return encodeServerDefault(rect: rect, framebuffer: framebuffer)
+        }
+
         var output: [UInt8] = []
         output.reserveCapacity(rect.width * rect.height * Int(pixelFormat.bitsPerPixel / 8))
 
@@ -81,6 +86,31 @@ enum RawEncoding {
                 let green = framebuffer.bgra[offset + 1]
                 let red = framebuffer.bgra[offset + 2]
                 pixelFormat.appendPixelBytes(red: red, green: green, blue: blue, to: &output)
+            }
+        }
+
+        return output
+    }
+
+    private static func encodeServerDefault(rect: Rect, framebuffer: Framebuffer) -> [UInt8] {
+        let rowByteCount = rect.width * 4
+        var output = [UInt8](repeating: 0, count: rowByteCount * rect.height)
+
+        output.withUnsafeMutableBytes { destination in
+            framebuffer.bgra.withUnsafeBytes { source in
+                for row in 0..<rect.height {
+                    let sourceOffset = (rect.y + row) * framebuffer.bytesPerRow + rect.x * 4
+                    let destinationOffset = row * rowByteCount
+                    memcpy(
+                        destination.baseAddress!.advanced(by: destinationOffset),
+                        source.baseAddress!.advanced(by: sourceOffset),
+                        rowByteCount
+                    )
+
+                    for alphaOffset in stride(from: destinationOffset + 3, to: destinationOffset + rowByteCount, by: 4) {
+                        destination[alphaOffset] = 0
+                    }
+                }
             }
         }
 
@@ -117,6 +147,33 @@ enum RawEncoding {
                 && rect.y < dirtyRect.y + dirtyRect.height
                 && dirtyRect.y < rect.y + rect.height
         }
+    }
+
+    private static func shouldTrustDirtyRects(_ dirtyRects: [Rect]?, within requested: Rect) -> Bool {
+        guard let dirtyRects, !dirtyRects.isEmpty else {
+            return false
+        }
+
+        let requestedArea = requested.width * requested.height
+        guard requestedArea > 0 else {
+            return false
+        }
+
+        var dirtyArea = 0
+        for dirtyRect in dirtyRects {
+            let x0 = max(requested.x, dirtyRect.x)
+            let y0 = max(requested.y, dirtyRect.y)
+            let x1 = min(requested.x + requested.width, dirtyRect.x + dirtyRect.width)
+            let y1 = min(requested.y + requested.height, dirtyRect.y + dirtyRect.height)
+            if x1 > x0, y1 > y0 {
+                dirtyArea = min(requestedArea, dirtyArea + (x1 - x0) * (y1 - y0))
+            }
+            if dirtyArea * 4 >= requestedArea {
+                return true
+            }
+        }
+
+        return false
     }
 
     private static func clip(_ rect: Rect, width: Int, height: Int) -> Rect {

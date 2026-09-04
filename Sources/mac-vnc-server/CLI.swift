@@ -295,7 +295,7 @@ enum CLI {
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
     Use --clipboard-sync to enable basic text clipboard synchronization.
-    Use --no-adaptive to disable adaptive frame pacing and compression.
+    Use --no-adaptive to disable adaptive compression.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
