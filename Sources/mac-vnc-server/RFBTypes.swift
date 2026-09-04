@@ -172,6 +172,7 @@ struct Framebuffer {
     let bgra: [UInt8]
     let layout: VirtualDisplayLayout
     let sequence: UInt64?
+    let dirtyRects: [Rect]?
 
     init(
         width: Int,
@@ -179,7 +180,8 @@ struct Framebuffer {
         bytesPerRow: Int? = nil,
         bgra: [UInt8],
         layout: VirtualDisplayLayout,
-        sequence: UInt64? = nil
+        sequence: UInt64? = nil,
+        dirtyRects: [Rect]? = nil
     ) {
         self.width = width
         self.height = height
@@ -187,6 +189,7 @@ struct Framebuffer {
         self.bgra = bgra
         self.layout = layout
         self.sequence = sequence
+        self.dirtyRects = dirtyRects
     }
 }
 

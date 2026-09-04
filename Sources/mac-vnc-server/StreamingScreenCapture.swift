@@ -389,6 +389,7 @@ private struct DisplayFrame {
     let height: Int
     let bytesPerRow: Int
     let bgra: [UInt8]
+    let dirtyRects: [Rect]?
 }
 
 private final class StreamingFrameStore: @unchecked Sendable {
@@ -403,7 +404,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
         self.expectedDisplayIDs = expectedDisplayIDs
     }
 
-    func update(displayID: CGDirectDisplayID, pixelBuffer: CVPixelBuffer) {
+    func update(displayID: CGDirectDisplayID, pixelBuffer: CVPixelBuffer, dirtyRects: [Rect]?) {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
@@ -422,7 +423,13 @@ private final class StreamingFrameStore: @unchecked Sendable {
 
         condition.lock()
         sequence &+= 1
-        frames[displayID] = DisplayFrame(width: width, height: height, bytesPerRow: bytesPerRow, bgra: bytes)
+        frames[displayID] = DisplayFrame(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            bgra: bytes,
+            dirtyRects: dirtyRects
+        )
         condition.broadcast()
         condition.unlock()
     }
@@ -462,15 +469,19 @@ private final class StreamingFrameStore: @unchecked Sendable {
                 bytesPerRow: frame.bytesPerRow,
                 bgra: frame.bgra,
                 layout: layout,
-                sequence: currentSequence
+                sequence: currentSequence,
+                dirtyRects: frame.dirtyRects
             )
         }
 
         let bytesPerRow = layout.width * 4
         var pixels = [UInt8](repeating: 0, count: bytesPerRow * layout.height)
+        var combinedDirtyRects: [Rect] = []
+        var hasUnknownDirtyRects = false
 
         for display in layout.displays {
             guard let frame = currentFrames[display.id] else {
+                hasUnknownDirtyRects = true
                 continue
             }
 
@@ -481,6 +492,19 @@ private final class StreamingFrameStore: @unchecked Sendable {
             let copyHeight = min(frame.height, layout.height - destinationY)
             guard copyWidth > 0, copyHeight > 0 else {
                 continue
+            }
+
+            if let dirtyRects = frame.dirtyRects {
+                combinedDirtyRects.append(contentsOf: dirtyRects.map {
+                    Rect(
+                        x: destinationX + $0.x,
+                        y: destinationY + $0.y,
+                        width: $0.width,
+                        height: $0.height
+                    )
+                })
+            } else {
+                hasUnknownDirtyRects = true
             }
 
             for row in 0..<copyHeight {
@@ -504,7 +528,8 @@ private final class StreamingFrameStore: @unchecked Sendable {
             bytesPerRow: bytesPerRow,
             bgra: pixels,
             layout: layout,
-            sequence: currentSequence
+            sequence: currentSequence,
+            dirtyRects: hasUnknownDirtyRects ? nil : combinedDirtyRects
         )
     }
 
@@ -531,7 +556,8 @@ private final class StreamingFrameStore: @unchecked Sendable {
                 bytesPerRow: frame.bytesPerRow,
                 bgra: frame.bgra,
                 layout: displayLayout,
-                sequence: currentSequence
+                sequence: currentSequence,
+                dirtyRects: frame.dirtyRects
             )
         }
 
@@ -560,7 +586,8 @@ private final class StreamingFrameStore: @unchecked Sendable {
             bytesPerRow: bytesPerRow,
             bgra: pixels,
             layout: displayLayout,
-            sequence: currentSequence
+            sequence: currentSequence,
+            dirtyRects: frame.dirtyRects
         )
     }
 }
@@ -599,6 +626,48 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         guard type == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else {
             return
         }
-        store.update(displayID: displayID, pixelBuffer: pixelBuffer)
+        let dirtyRects = Self.dirtyRects(
+            from: sampleBuffer,
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer)
+        )
+        store.update(displayID: displayID, pixelBuffer: pixelBuffer, dirtyRects: dirtyRects)
+    }
+
+    private static func dirtyRects(
+        from sampleBuffer: CMSampleBuffer,
+        width: Int,
+        height: Int
+    ) -> [Rect]? {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+        let frameInfo = attachments.first,
+        let values = frameInfo[.dirtyRects] as? [NSValue] else {
+            return nil
+        }
+
+        var rects: [Rect] = []
+        for value in values {
+            let rect = value.rectValue
+            let x = max(0, Int(rect.minX.rounded(.down)))
+            let y = max(0, Int(rect.minY.rounded(.down)))
+            let right = min(width, Int(rect.maxX.rounded(.up)))
+            let bottom = min(height, Int(rect.maxY.rounded(.up)))
+            guard right > x, bottom > y else {
+                continue
+            }
+
+            let rectWidth = right - x
+            let rectHeight = bottom - y
+            rects.append(Rect(x: x, y: y, width: rectWidth, height: rectHeight))
+
+            let flippedY = max(0, height - bottom)
+            if flippedY != y {
+                rects.append(Rect(x: x, y: flippedY, width: rectWidth, height: rectHeight))
+            }
+        }
+        return rects
     }
 }

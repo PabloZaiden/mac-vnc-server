@@ -40,6 +40,15 @@ import zlib
     #expect(config.clipboardSync)
 }
 
+@Test func cliDisablesAdaptiveStreamingWhenRequested() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--no-adaptive"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(!config.adaptiveStreaming)
+}
+
 @Test func cliParsesUpdateCommand() throws {
     guard case .update = try CLI.parse(arguments: ["update"]) else {
         Issue.record("expected update command")
@@ -156,6 +165,31 @@ import zlib
     #expect(rects == [Rect(x: 0, y: 0, width: 2, height: 2)])
 }
 
+@Test func incrementalRawEncodingUsesDirtyRectsToSkipCleanTiles() {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 4, height: 1)
+    let previous = Framebuffer(
+        width: 4,
+        height: 1,
+        bgra: [UInt8](repeating: 0, count: 16),
+        layout: layout
+    )
+    var currentBytes = [UInt8](repeating: 0, count: 16)
+    currentBytes[0] = 1
+    currentBytes[12] = 1
+    let current = Framebuffer(width: 4, height: 1, bgra: currentBytes, layout: layout)
+
+    let rects = RawEncoding.rectangles(
+        current: current,
+        previous: previous,
+        requested: Rect(x: 0, y: 0, width: 4, height: 1),
+        incremental: true,
+        dirtyRects: [Rect(x: 3, y: 0, width: 1, height: 1)],
+        tileSize: 1
+    )
+
+    #expect(rects == [Rect(x: 3, y: 0, width: 1, height: 1)])
+}
+
 @Test func zlibEncodingRoundTripsRawPayload() throws {
     let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
     let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
@@ -190,6 +224,55 @@ import zlib
 
     #expect(status == Z_OK)
     #expect(decompressed == [0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00])
+}
+
+@Test func zlibCompressionLevelCanChangeBetweenUpdates() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
+    let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
+        0x03, 0x02, 0x01, 0xff,
+        0x06, 0x05, 0x04, 0xff
+    ], layout: layout)
+    let encoder = try ZlibEncoder()
+    let first = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 2, height: 1),
+        framebuffer: framebuffer,
+        pixelFormat: .serverDefault
+    )
+    try encoder.setCompressionLevel(6)
+    let second = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 2, height: 1),
+        framebuffer: framebuffer,
+        pixelFormat: .serverDefault
+    )
+
+    var stream = z_stream()
+    #expect(inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
+    defer { inflateEnd(&stream) }
+
+    var decompressed = [UInt8]()
+    for payload in [first, second] {
+        let compressedLength = Int(UInt32.be(payload[0], payload[1], payload[2], payload[3]))
+        var compressed = Array(payload.dropFirst(4))
+        var output = [UInt8](repeating: 0, count: 8)
+        let outputCount = output.count
+        let status = compressed.withUnsafeMutableBytes { inputPointer in
+            output.withUnsafeMutableBytes { outputPointer in
+                stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
+                stream.avail_in = uInt(compressedLength)
+                stream.next_out = outputPointer.bindMemory(to: Bytef.self).baseAddress
+                stream.avail_out = uInt(outputCount)
+                return inflate(&stream, Z_SYNC_FLUSH)
+            }
+        }
+
+        #expect(status == Z_OK)
+        decompressed += output.prefix(8 - Int(stream.avail_out))
+    }
+
+    #expect(decompressed == [
+        0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00,
+        0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00
+    ])
 }
 
 @Test func zrleEncodingUsesRawTilesWithCPixels() throws {

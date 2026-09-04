@@ -1,4 +1,5 @@
 import Foundation
+import zlib
 
 struct ServerConfig {
     let bindAddress: String
@@ -10,6 +11,7 @@ struct ServerConfig {
     let displaySelection: DisplaySelection
     let verbose: Bool
     let clipboardSync: Bool
+    let adaptiveStreaming: Bool
 }
 
 enum DisplaySelection: Equatable {
@@ -73,6 +75,7 @@ final class RFBServer {
                     input: input,
                     clipboard: clipboard,
                     clipboardSync: config.clipboardSync,
+                    adaptiveStreaming: config.adaptiveStreaming,
                     logger: logger
                 ).run()
             } catch {
@@ -104,11 +107,13 @@ final class RFBClientSession: @unchecked Sendable {
     private let socket: ClientSocket
     private let password: String?
     private let minimumFrameInterval: TimeInterval
+    private var frameInterval: TimeInterval
     private let encodingPreference: EncodingPreference
     private let capture: FramebufferSource
     private let input: InputController
     private let clipboard: ClipboardBridge
     private let clipboardSync: Bool
+    private let adaptiveStreaming: Bool
     private let logger: ServerLogger
     private var pixelFormat = PixelFormat.serverDefault
     private var clientEncodings: [Int32] = [RFBEncoding.raw.rawValue]
@@ -126,6 +131,7 @@ final class RFBClientSession: @unchecked Sendable {
     private var writerError: Error?
     private var updatesSent = 0
     private var bytesSent = 0
+    private var fastUpdateCount = 0
 
     init(
         socket: ClientSocket,
@@ -136,16 +142,19 @@ final class RFBClientSession: @unchecked Sendable {
         input: InputController,
         clipboard: ClipboardBridge,
         clipboardSync: Bool,
+        adaptiveStreaming: Bool,
         logger: ServerLogger
     ) throws {
         self.socket = socket
         self.password = password
         minimumFrameInterval = 1.0 / Double(fps)
+        frameInterval = minimumFrameInterval
         self.encodingPreference = encodingPreference
         self.capture = capture
         self.input = input
         self.clipboard = clipboard
         self.clipboardSync = clipboardSync
+        self.adaptiveStreaming = adaptiveStreaming
         self.logger = logger
         zrleEncoder = try ZRLEEncoder()
         zlibEncoder = try ZlibEncoder()
@@ -361,12 +370,23 @@ final class RFBClientSession: @unchecked Sendable {
 
     private func sendFramebufferUpdate(_ request: FramebufferUpdateRequest) throws {
         throttleFrameRate()
+        let frameStarted = Date()
 
         let framebuffer = try capture.capture()
         let requested = request.rect
         let (format, encoding, previous, sentBefore) = stateSnapshotForEncoding()
         let shouldDiff = sentBefore
             && request.incremental
+        let dirtyRects: [Rect]?
+        if shouldDiff,
+           let previous,
+           let sequence = framebuffer.sequence,
+           let previousSequence = previous.sequence,
+           sequence == previousSequence &+ 1 {
+            dirtyRects = framebuffer.dirtyRects
+        } else {
+            dirtyRects = nil
+        }
         let rects: [Rect]
         if shouldDiff,
            let previous,
@@ -378,7 +398,8 @@ final class RFBClientSession: @unchecked Sendable {
                 current: framebuffer,
                 previous: previous,
                 requested: requested,
-                incremental: shouldDiff
+                incremental: shouldDiff,
+                dirtyRects: dirtyRects
             )
         }
 
@@ -420,6 +441,8 @@ final class RFBClientSession: @unchecked Sendable {
         currentLayout = framebuffer.layout
         hasSentFramebufferUpdate = true
         state.unlock()
+
+        try adaptStreaming(frameDuration: Date().timeIntervalSince(frameStarted), encoding: encoding)
 
         if clipboardSync, let text = clipboard.localTextIfChanged() {
             try sendServerCutText(text)
@@ -467,10 +490,53 @@ final class RFBClientSession: @unchecked Sendable {
 
     private func throttleFrameRate() {
         let elapsed = Date().timeIntervalSince(lastFramebufferUpdate)
-        if elapsed < minimumFrameInterval {
-            usleep(useconds_t((minimumFrameInterval - elapsed) * 1_000_000))
+        if elapsed < frameInterval {
+            usleep(useconds_t((frameInterval - elapsed) * 1_000_000))
         }
         lastFramebufferUpdate = Date()
+    }
+
+    private func adaptStreaming(frameDuration: TimeInterval, encoding: RFBEncoding) throws {
+        guard adaptiveStreaming else {
+            return
+        }
+
+        let target = minimumFrameInterval
+        if frameDuration > target * 1.25 {
+            frameInterval = min(0.5, max(target, frameDuration * 1.1))
+            fastUpdateCount = 0
+
+            let level: Int32 = frameDuration > target * 2.5 ? 6 : 3
+            try setCompressionLevel(level, for: encoding)
+            return
+        }
+
+        guard frameDuration < target * 0.75 else {
+            fastUpdateCount = 0
+            return
+        }
+
+        fastUpdateCount += 1
+        guard fastUpdateCount >= 30 else {
+            return
+        }
+
+        fastUpdateCount = 0
+        frameInterval = max(target, frameInterval * 0.9)
+        if frameInterval <= target * 1.05 {
+            try setCompressionLevel(1, for: encoding)
+        }
+    }
+
+    private func setCompressionLevel(_ level: Int32, for encoding: RFBEncoding) throws {
+        switch encoding {
+        case .zrle:
+            try zrleEncoder.setCompressionLevel(level)
+        case .zlib:
+            try zlibEncoder.setCompressionLevel(level)
+        case .raw:
+            return
+        }
     }
 
     private func handleKeyEvent() throws {

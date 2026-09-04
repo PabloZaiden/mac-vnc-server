@@ -171,6 +171,7 @@ enum CLI {
         var displaySelection = DisplaySelection.automatic
         var verbose = false
         var clipboardSync = false
+        var adaptiveStreaming = true
         var index = 0
 
         while index < arguments.count {
@@ -232,6 +233,8 @@ enum CLI {
                 verbose = true
             case "--clipboard-sync":
                 clipboardSync = true
+            case "--no-adaptive":
+                adaptiveStreaming = false
             case "--help", "-h":
                 throw CLIError.helpRequested(helpText)
             default:
@@ -256,7 +259,8 @@ enum CLI {
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
             verbose: verbose,
-            clipboardSync: clipboardSync
+            clipboardSync: clipboardSync,
+            adaptiveStreaming: adaptiveStreaming
         )
     }
 
@@ -279,7 +283,7 @@ enum CLI {
     Usage:
       mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps 30] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
-                          [--display all|number] [--verbose] [--clipboard-sync]
+                          [--display all|number] [--verbose] [--clipboard-sync] [--no-adaptive]
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server wakeup
@@ -291,6 +295,7 @@ enum CLI {
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
     Use --clipboard-sync to enable basic text clipboard synchronization.
+    Use --no-adaptive to disable adaptive frame pacing and compression.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
@@ -326,7 +331,8 @@ private extension ServerConfig {
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
             verbose: verbose,
-            clipboardSync: clipboardSync
+            clipboardSync: clipboardSync,
+            adaptiveStreaming: adaptiveStreaming
         )
     }
 }

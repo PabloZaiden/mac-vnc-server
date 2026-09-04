@@ -6,6 +6,7 @@ enum RawEncoding {
         previous: Framebuffer?,
         requested: Rect,
         incremental: Bool,
+        dirtyRects: [Rect]? = nil,
         tileSize: Int = 64
     ) -> [Rect] {
         let clipped = clip(requested, width: current.width, height: current.height)
@@ -27,7 +28,8 @@ enum RawEncoding {
             while x < clipped.x + clipped.width {
                 let w = min(tileSize, clipped.x + clipped.width - x)
                 var run = Rect(x: x, y: y, width: w, height: h)
-                guard hasChanges(rect: run, current: current, previous: previous) else {
+                guard isDirtyCandidate(run, dirtyRects: dirtyRects),
+                      hasChanges(rect: run, current: current, previous: previous) else {
                     x += tileSize
                     continue
                 }
@@ -36,7 +38,8 @@ enum RawEncoding {
                 while x < clipped.x + clipped.width {
                     let nextWidth = min(tileSize, clipped.x + clipped.width - x)
                     let next = Rect(x: x, y: y, width: nextWidth, height: h)
-                    guard hasChanges(rect: next, current: current, previous: previous) else {
+                    guard isDirtyCandidate(next, dirtyRects: dirtyRects),
+                          hasChanges(rect: next, current: current, previous: previous) else {
                         break
                     }
                     run.width += next.width
@@ -101,6 +104,18 @@ enum RawEncoding {
                 }
                 return false
             }
+        }
+    }
+
+    private static func isDirtyCandidate(_ rect: Rect, dirtyRects: [Rect]?) -> Bool {
+        guard let dirtyRects else {
+            return true
+        }
+        return dirtyRects.contains { dirtyRect in
+            rect.x < dirtyRect.x + dirtyRect.width
+                && dirtyRect.x < rect.x + rect.width
+                && rect.y < dirtyRect.y + dirtyRect.height
+                && dirtyRect.y < rect.y + rect.height
         }
     }
 
