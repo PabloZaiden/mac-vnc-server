@@ -31,12 +31,12 @@ final class ZlibEncoder {
 
         var input = bytes
         let inputCount = input.count
+        var chunk = [UInt8](repeating: 0, count: 16 * 1024)
         try input.withUnsafeMutableBytes { inputPointer in
             stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
             stream.avail_in = uInt(inputCount)
 
             repeat {
-                var chunk = [UInt8](repeating: 0, count: 16 * 1024)
                 let chunkCount = chunk.count
                 let before = stream.total_out
                 let status = chunk.withUnsafeMutableBytes { outputPointer in

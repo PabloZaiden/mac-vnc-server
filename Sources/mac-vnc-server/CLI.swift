@@ -50,10 +50,28 @@ enum CLICommand {
             return
         }
 
+        let sharedLogger = ServerLogger(verbose: config.verbose)
+        let sharedCapture = try await StreamingScreenCapture(
+            scale: config.scale,
+            fps: config.fps,
+            displaySelection: .all,
+            logger: sharedLogger
+        )
+
         for config in configs {
+            let capture: SelectedDisplayFramebufferSource
+            switch config.displaySelection {
+            case .all:
+                capture = SelectedDisplayFramebufferSource(source: sharedCapture, displayIndex: nil)
+            case .display(let displayIndex):
+                capture = SelectedDisplayFramebufferSource(source: sharedCapture, displayIndex: displayIndex)
+            case .automatic:
+                throw CLIError.invalidArgument("automatic display selection could not be expanded")
+            }
+
             Task.detached {
                 do {
-                    try await Self.runServer(config: config)
+                    try await Self.runServer(config: config, capture: capture)
                 } catch {
                     fputs("mac-vnc-server \(config.bindAddress):\(config.port): \(CLI.errorMessage(for: error))\n", stderr)
                     Foundation.exit(1)
@@ -86,19 +104,24 @@ enum CLICommand {
         return configs
     }
 
-    private static func runServer(config: ServerConfig) async throws {
+    private static func runServer(config: ServerConfig, capture: FramebufferSource? = nil) async throws {
         let logger = ServerLogger(verbose: config.verbose)
-        let capture = try await StreamingScreenCapture(
-            scale: config.scale,
-            fps: config.fps,
-            displaySelection: config.displaySelection,
-            logger: logger
-        )
+        let captureSource: FramebufferSource
+        if let capture {
+            captureSource = capture
+        } else {
+            captureSource = try await StreamingScreenCapture(
+                scale: config.scale,
+                fps: config.fps,
+                displaySelection: config.displaySelection,
+                logger: logger
+            )
+        }
         let input = MacInputController()
         let clipboard = MacClipboard()
         let server = RFBServer(
             config: config,
-            capture: capture,
+            capture: captureSource,
             input: input,
             clipboard: clipboard,
             logger: logger

@@ -130,6 +130,32 @@ import zlib
     #expect(rects == [Rect(x: 1, y: 0, width: 1, height: 1)])
 }
 
+@Test func incrementalRawEncodingCoalescesAdjacentChangedTiles() {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 2)
+    let previous = Framebuffer(
+        width: 2,
+        height: 2,
+        bgra: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        layout: layout
+    )
+    let current = Framebuffer(
+        width: 2,
+        height: 2,
+        bgra: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+        layout: layout
+    )
+
+    let rects = RawEncoding.rectangles(
+        current: current,
+        previous: previous,
+        requested: Rect(x: 0, y: 0, width: 2, height: 2),
+        incremental: true,
+        tileSize: 1
+    )
+
+    #expect(rects == [Rect(x: 0, y: 0, width: 2, height: 2)])
+}
+
 @Test func zlibEncodingRoundTripsRawPayload() throws {
     let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
     let framebuffer = Framebuffer(width: 2, height: 1, bgra: [

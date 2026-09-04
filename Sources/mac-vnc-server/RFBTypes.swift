@@ -82,16 +82,45 @@ struct PixelFormat: Equatable {
     }
 
     func pixelBytes(red: UInt8, green: UInt8, blue: UInt8) -> [UInt8] {
-        let pixel = packedPixel(red: red, green: green, blue: blue)
-        return integerBytes(pixel, byteCount: Int(bitsPerPixel / 8))
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(Int(bitsPerPixel / 8))
+        appendPixelBytes(red: red, green: green, blue: blue, to: &bytes)
+        return bytes
     }
 
     func cPixelBytes(red: UInt8, green: UInt8, blue: UInt8) -> [UInt8] {
-        let bytes = pixelBytes(red: red, green: green, blue: blue)
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(cPixelByteCount)
+        appendCPixelBytes(red: red, green: green, blue: blue, to: &bytes)
+        return bytes
+    }
+
+    func appendPixelBytes(red: UInt8, green: UInt8, blue: UInt8, to output: inout [UInt8]) {
+        appendIntegerBytes(
+            packedPixel(red: red, green: green, blue: blue),
+            byteCount: Int(bitsPerPixel / 8),
+            to: &output
+        )
+    }
+
+    func appendCPixelBytes(red: UInt8, green: UInt8, blue: UInt8, to output: inout [UInt8]) {
+        let pixel = packedPixel(red: red, green: green, blue: blue)
+        let byteCount = Int(bitsPerPixel / 8)
+
         guard usesThreeByteCPixel else {
-            return bytes
+            appendIntegerBytes(pixel, byteCount: byteCount, to: &output)
+            return
         }
-        return bigEndian ? Array(bytes.dropFirst()) : Array(bytes.dropLast())
+
+        if bigEndian {
+            for index in stride(from: byteCount - 2, through: 0, by: -1) {
+                output.append(UInt8((pixel >> UInt32(index * 8)) & 0xff))
+            }
+        } else {
+            for index in 0..<(byteCount - 1) {
+                output.append(UInt8((pixel >> UInt32(index * 8)) & 0xff))
+            }
+        }
     }
 
     var cPixelByteCount: Int {
@@ -116,10 +145,15 @@ struct PixelFormat: Equatable {
         return redValue | greenValue | blueValue
     }
 
-    private func integerBytes(_ value: UInt32, byteCount: Int) -> [UInt8] {
-        let indices = bigEndian ? Array((0..<byteCount).reversed()) : Array(0..<byteCount)
-        return indices.map { index in
-            UInt8((value >> UInt32(index * 8)) & 0xff)
+    private func appendIntegerBytes(_ value: UInt32, byteCount: Int, to output: inout [UInt8]) {
+        if bigEndian {
+            for index in stride(from: byteCount - 1, through: 0, by: -1) {
+                output.append(UInt8((value >> UInt32(index * 8)) & 0xff))
+            }
+        } else {
+            for index in 0..<byteCount {
+                output.append(UInt8((value >> UInt32(index * 8)) & 0xff))
+            }
         }
     }
 
@@ -137,13 +171,22 @@ struct Framebuffer {
     let bytesPerRow: Int
     let bgra: [UInt8]
     let layout: VirtualDisplayLayout
+    let sequence: UInt64?
 
-    init(width: Int, height: Int, bytesPerRow: Int? = nil, bgra: [UInt8], layout: VirtualDisplayLayout) {
+    init(
+        width: Int,
+        height: Int,
+        bytesPerRow: Int? = nil,
+        bgra: [UInt8],
+        layout: VirtualDisplayLayout,
+        sequence: UInt64? = nil
+    ) {
         self.width = width
         self.height = height
         self.bytesPerRow = bytesPerRow ?? width * 4
         self.bgra = bgra
         self.layout = layout
+        self.sequence = sequence
     }
 }
 

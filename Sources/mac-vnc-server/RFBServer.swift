@@ -122,7 +122,7 @@ final class RFBClientSession: @unchecked Sendable {
     private let state = NSCondition()
     private var stopped = false
     private var latestUpdateRequest: FramebufferUpdateRequest?
-    private var updatesEnabled = false
+    private var activeUpdateRequest: FramebufferUpdateRequest?
     private var writerError: Error?
     private var updatesSent = 0
     private var bytesSent = 0
@@ -140,7 +140,7 @@ final class RFBClientSession: @unchecked Sendable {
     ) throws {
         self.socket = socket
         self.password = password
-        minimumFrameInterval = 0.85 / Double(fps)
+        minimumFrameInterval = 1.0 / Double(fps)
         self.encodingPreference = encodingPreference
         self.capture = capture
         self.input = input
@@ -297,7 +297,6 @@ final class RFBClientSession: @unchecked Sendable {
             incremental: incremental,
             rect: Rect(x: x, y: y, width: width, height: height)
         )
-        updatesEnabled = true
         state.signal()
         state.unlock()
     }
@@ -330,14 +329,27 @@ final class RFBClientSession: @unchecked Sendable {
         state.lock()
         defer { state.unlock() }
 
-        while (!updatesEnabled || latestUpdateRequest == nil) && !stopped {
+        while latestUpdateRequest == nil && activeUpdateRequest == nil && !stopped {
             state.wait()
         }
         guard !stopped else {
             return nil
         }
 
-        return latestUpdateRequest
+        if let request = latestUpdateRequest {
+            latestUpdateRequest = nil
+            activeUpdateRequest = request
+            return request
+        }
+
+        guard let activeUpdateRequest else {
+            return nil
+        }
+
+        return FramebufferUpdateRequest(
+            incremental: true,
+            rect: activeUpdateRequest.rect
+        )
     }
 
     private func stopFramebufferWriter() {
@@ -355,38 +367,52 @@ final class RFBClientSession: @unchecked Sendable {
         let (format, encoding, previous, sentBefore) = stateSnapshotForEncoding()
         let shouldDiff = sentBefore
             && request.incremental
-        let rects = RawEncoding.rectangles(
-            current: framebuffer,
-            previous: previous,
-            requested: requested,
-            incremental: shouldDiff
-        )
-
-        var response: [UInt8] = [0, 0]
-        response += UInt16(rects.count).beBytes
-
-        for rect in rects {
-            response += UInt16(rect.x).beBytes
-            response += UInt16(rect.y).beBytes
-            response += UInt16(rect.width).beBytes
-            response += UInt16(rect.height).beBytes
-            switch encoding {
-            case .zrle:
-                response += UInt32(bitPattern: RFBEncoding.zrle.rawValue).beBytes
-                response += try zrleEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
-            case .zlib:
-                response += UInt32(bitPattern: RFBEncoding.zlib.rawValue).beBytes
-                response += try zlibEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
-            case .raw:
-                response += UInt32(bitPattern: RFBEncoding.raw.rawValue).beBytes
-                response += try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
-            }
+        let rects: [Rect]
+        if shouldDiff,
+           let previous,
+           let sequence = framebuffer.sequence,
+           previous.sequence == sequence {
+            rects = []
+        } else {
+            rects = RawEncoding.rectangles(
+                current: framebuffer,
+                previous: previous,
+                requested: requested,
+                incremental: shouldDiff
+            )
         }
 
-        try socket.writeAll(response)
+        let header = [0, 0] + UInt16(rects.count).beBytes
+        try socket.writeAll(header)
+        var updateBytes = header.count
+
+        for rect in rects {
+            let payload: [UInt8]
+            let encodingBytes = UInt32(bitPattern: encoding.rawValue).beBytes
+            switch encoding {
+            case .zrle:
+                payload = try zrleEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+            case .zlib:
+                payload = try zlibEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+            case .raw:
+                payload = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+            }
+
+            var rectResponse: [UInt8] = []
+            rectResponse.reserveCapacity(12 + payload.count)
+            rectResponse += UInt16(rect.x).beBytes
+            rectResponse += UInt16(rect.y).beBytes
+            rectResponse += UInt16(rect.width).beBytes
+            rectResponse += UInt16(rect.height).beBytes
+            rectResponse += encodingBytes
+            rectResponse += payload
+            try socket.writeAll(rectResponse)
+            updateBytes += rectResponse.count
+        }
+
         state.lock()
         updatesSent += 1
-        bytesSent += response.count
+        bytesSent += updateBytes
         if updatesSent == 1 || updatesSent % 60 == 0 {
             logger.verbose("updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) total_bytes=\(bytesSent)")
         }

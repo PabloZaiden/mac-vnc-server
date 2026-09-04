@@ -72,6 +72,10 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         try currentStore().snapshot()
     }
 
+    func capture(displayIndex: Int) throws -> Framebuffer {
+        try currentStore().snapshot(displayIndex: displayIndex)
+    }
+
     func requestRecoveryAfterInput() {
         recoveryLock.lock()
         let needed = recoveryNeeded
@@ -163,7 +167,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
                 config.height = height
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-                config.queueDepth = 5
+                config.queueDepth = 3
                 config.showsCursor = true
 
                 let delegate = ScreenCaptureStreamDelegate(eventSink: eventSink)
@@ -392,6 +396,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
     private let layout: VirtualDisplayLayout
     private let expectedDisplayIDs: Set<CGDirectDisplayID>
     private var frames: [CGDirectDisplayID: DisplayFrame] = [:]
+    private var sequence: UInt64 = 0
 
     init(layout: VirtualDisplayLayout, expectedDisplayIDs: Set<CGDirectDisplayID>) {
         self.layout = layout
@@ -416,6 +421,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
         }
 
         condition.lock()
+        sequence &+= 1
         frames[displayID] = DisplayFrame(width: width, height: height, bytesPerRow: bytesPerRow, bgra: bytes)
         condition.broadcast()
         condition.unlock()
@@ -437,6 +443,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
     func snapshot() throws -> Framebuffer {
         condition.lock()
         let currentFrames = frames
+        let currentSequence = sequence
         condition.unlock()
 
         guard !currentFrames.isEmpty else {
@@ -449,7 +456,14 @@ private final class StreamingFrameStore: @unchecked Sendable {
            frame.width == layout.width,
            frame.height == layout.height,
            frame.bytesPerRow == layout.width * 4 {
-            return Framebuffer(width: layout.width, height: layout.height, bytesPerRow: frame.bytesPerRow, bgra: frame.bgra, layout: layout)
+            return Framebuffer(
+                width: layout.width,
+                height: layout.height,
+                bytesPerRow: frame.bytesPerRow,
+                bgra: frame.bgra,
+                layout: layout,
+                sequence: currentSequence
+            )
         }
 
         let bytesPerRow = layout.width * 4
@@ -484,7 +498,91 @@ private final class StreamingFrameStore: @unchecked Sendable {
             }
         }
 
-        return Framebuffer(width: layout.width, height: layout.height, bytesPerRow: bytesPerRow, bgra: pixels, layout: layout)
+        return Framebuffer(
+            width: layout.width,
+            height: layout.height,
+            bytesPerRow: bytesPerRow,
+            bgra: pixels,
+            layout: layout,
+            sequence: currentSequence
+        )
+    }
+
+    func snapshot(displayIndex: Int) throws -> Framebuffer {
+        condition.lock()
+        let currentFrames = frames
+        let currentSequence = sequence
+        condition.unlock()
+
+        guard layout.displays.indices.contains(displayIndex - 1) else {
+            throw RFBError.captureFailed("display \(displayIndex) is not available")
+        }
+
+        let display = layout.displays[displayIndex - 1]
+        guard let frame = currentFrames[display.id] else {
+            throw RFBError.captureFailed("no ScreenCaptureKit frame available for display \(displayIndex)")
+        }
+
+        let displayLayout = VirtualDisplayLayout(displays: [display], scaleOverride: layout.scale)
+        if frame.width == displayLayout.width, frame.height == displayLayout.height {
+            return Framebuffer(
+                width: displayLayout.width,
+                height: displayLayout.height,
+                bytesPerRow: frame.bytesPerRow,
+                bgra: frame.bgra,
+                layout: displayLayout,
+                sequence: currentSequence
+            )
+        }
+
+        let bytesPerRow = displayLayout.width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * displayLayout.height)
+        let copyWidth = min(frame.width, displayLayout.width)
+        let copyHeight = min(frame.height, displayLayout.height)
+
+        for row in 0..<copyHeight {
+            let sourceOffset = row * frame.bytesPerRow
+            let destinationOffset = row * bytesPerRow
+            _ = pixels.withUnsafeMutableBytes { destination in
+                frame.bgra.withUnsafeBytes { source in
+                    memcpy(
+                        destination.baseAddress!.advanced(by: destinationOffset),
+                        source.baseAddress!.advanced(by: sourceOffset),
+                        copyWidth * 4
+                    )
+                }
+            }
+        }
+
+        return Framebuffer(
+            width: displayLayout.width,
+            height: displayLayout.height,
+            bytesPerRow: bytesPerRow,
+            bgra: pixels,
+            layout: displayLayout,
+            sequence: currentSequence
+        )
+    }
+}
+
+final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSource, InputRecoverySource {
+    private let source: StreamingScreenCapture
+    private let displayIndex: Int?
+
+    init(source: StreamingScreenCapture, displayIndex: Int?) {
+        self.source = source
+        self.displayIndex = displayIndex
+    }
+
+    func capture() throws -> Framebuffer {
+        if let displayIndex {
+            return try source.capture(displayIndex: displayIndex)
+        }
+        return try source.capture()
+    }
+
+    func requestRecoveryAfterInput() {
+        source.requestRecoveryAfterInput()
     }
 }
 
