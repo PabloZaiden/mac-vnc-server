@@ -1,5 +1,4 @@
 import Foundation
-import zlib
 
 struct ServerConfig {
     let bindAddress: String

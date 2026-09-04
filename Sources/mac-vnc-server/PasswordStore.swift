@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum PasswordStoreError: LocalizedError {
@@ -16,6 +17,14 @@ enum PasswordStore {
     static let configFileName = "config.json"
 
     private static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789")
+
+    private enum PathKind {
+        case missing
+        case directory
+        case regularFile
+        case symbolicLink
+        case other
+    }
 
     private struct Config: Codable {
         let password: String
@@ -36,8 +45,19 @@ enum PasswordStore {
         try ensureDirectory(directoryURL, fileManager: fileManager)
 
         let fileURL = directoryURL.appendingPathComponent(configFileName)
-        if fileManager.fileExists(atPath: fileURL.path) {
+        switch try pathKind(at: fileURL) {
+        case .regularFile:
             return try load(from: fileURL, fileManager: fileManager)
+        case .missing:
+            break
+        case .symbolicLink:
+            throw PasswordStoreError.invalidConfiguration(
+                "\(fileURL.path) must be a regular file and not a symbolic link"
+            )
+        case .directory, .other:
+            throw PasswordStoreError.invalidConfiguration(
+                "\(fileURL.path) must be a regular file"
+            )
         }
 
         let password = generatePassword()
@@ -59,7 +79,7 @@ enum PasswordStore {
             )
             try fileManager.moveItem(at: temporaryURL, to: fileURL)
         } catch {
-            if fileManager.fileExists(atPath: fileURL.path) {
+            if case .regularFile = try pathKind(at: fileURL) {
                 return try load(from: fileURL, fileManager: fileManager)
             }
             throw error
@@ -69,11 +89,28 @@ enum PasswordStore {
     }
 
     private static func ensureDirectory(_ directoryURL: URL, fileManager: FileManager) throws {
-        if !fileManager.fileExists(atPath: directoryURL.path) {
+        switch try pathKind(at: directoryURL) {
+        case .missing:
             try fileManager.createDirectory(
                 at: directoryURL,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: NSNumber(value: 0o700)]
+            )
+        case .directory:
+            break
+        case .symbolicLink:
+            throw PasswordStoreError.invalidConfiguration(
+                "\(directoryURL.path) must be a directory and not a symbolic link"
+            )
+        case .regularFile, .other:
+            throw PasswordStoreError.invalidConfiguration(
+                "\(directoryURL.path) must be a directory"
+            )
+        }
+
+        guard case .directory = try pathKind(at: directoryURL) else {
+            throw PasswordStoreError.invalidConfiguration(
+                "\(directoryURL.path) must be a directory and not a symbolic link"
             )
         }
 
@@ -84,6 +121,12 @@ enum PasswordStore {
     }
 
     private static func load(from fileURL: URL, fileManager: FileManager) throws -> String {
+        guard case .regularFile = try pathKind(at: fileURL) else {
+            throw PasswordStoreError.invalidConfiguration(
+                "\(fileURL.path) must be a regular file and not a symbolic link"
+            )
+        }
+
         let data = try Data(contentsOf: fileURL)
         let config: Config
         do {
@@ -105,6 +148,32 @@ enum PasswordStore {
             ofItemAtPath: fileURL.path
         )
         return config.password
+    }
+
+    private static func pathKind(at url: URL) throws -> PathKind {
+        var fileInfo = stat()
+        let result = url.path.withCString { path in
+            lstat(path, &fileInfo)
+        }
+        guard result == 0 else {
+            guard errno == ENOENT else {
+                throw PasswordStoreError.invalidConfiguration(
+                    "could not inspect \(url.path): \(String(cString: strerror(errno)))"
+                )
+            }
+            return .missing
+        }
+
+        switch fileInfo.st_mode & S_IFMT {
+        case S_IFDIR:
+            return .directory
+        case S_IFREG:
+            return .regularFile
+        case S_IFLNK:
+            return .symbolicLink
+        default:
+            return .other
+        }
     }
 
     private static func encodedConfig(password: String) throws -> Data {

@@ -89,6 +89,40 @@ import zlib
     #expect((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
 }
 
+@Test func passwordStoreRejectsSymlinkedPaths() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mac-vnc-server-password-links-\(UUID().uuidString)", isDirectory: true)
+    let fileManager = FileManager.default
+    defer { try? fileManager.removeItem(at: root) }
+
+    let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
+    let linkedDirectory = root.appendingPathComponent("config-directory", isDirectory: true)
+    try fileManager.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(at: linkedDirectory, withDestinationURL: targetDirectory)
+
+    var rejectedDirectoryLink = false
+    do {
+        _ = try PasswordStore.loadOrCreate(in: linkedDirectory)
+    } catch {
+        rejectedDirectoryLink = true
+    }
+    #expect(rejectedDirectoryLink)
+
+    try fileManager.removeItem(at: linkedDirectory)
+    let configURL = targetDirectory.appendingPathComponent(PasswordStore.configFileName)
+    let targetURL = targetDirectory.appendingPathComponent("target.json")
+    try Data(#"{"password":"ABCDEFGH"}"#.utf8).write(to: targetURL)
+    try fileManager.createSymbolicLink(at: configURL, withDestinationURL: targetURL)
+
+    var rejectedFileLink = false
+    do {
+        _ = try PasswordStore.loadOrCreate(in: targetDirectory)
+    } catch {
+        rejectedFileLink = true
+    }
+    #expect(rejectedFileLink)
+}
+
 @Test func cliParsesFixedFrameRate() throws {
     guard case .run(let config) = try CLI.parse(arguments: ["run", "--fps", "30"]) else {
         Issue.record("expected run command")
