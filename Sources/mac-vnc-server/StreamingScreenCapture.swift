@@ -72,6 +72,10 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         try currentStore().snapshot()
     }
 
+    func capture(displayIndex: Int) throws -> Framebuffer {
+        try currentStore().snapshot(displayIndex: displayIndex)
+    }
+
     func requestRecoveryAfterInput() {
         recoveryLock.lock()
         let needed = recoveryNeeded
@@ -163,7 +167,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
                 config.height = height
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-                config.queueDepth = 5
+                config.queueDepth = 3
                 config.showsCursor = true
 
                 let delegate = ScreenCaptureStreamDelegate(eventSink: eventSink)
@@ -385,6 +389,7 @@ private struct DisplayFrame {
     let height: Int
     let bytesPerRow: Int
     let bgra: [UInt8]
+    let dirtyRects: [Rect]?
 }
 
 private final class StreamingFrameStore: @unchecked Sendable {
@@ -392,13 +397,14 @@ private final class StreamingFrameStore: @unchecked Sendable {
     private let layout: VirtualDisplayLayout
     private let expectedDisplayIDs: Set<CGDirectDisplayID>
     private var frames: [CGDirectDisplayID: DisplayFrame] = [:]
+    private var sequence: UInt64 = 0
 
     init(layout: VirtualDisplayLayout, expectedDisplayIDs: Set<CGDirectDisplayID>) {
         self.layout = layout
         self.expectedDisplayIDs = expectedDisplayIDs
     }
 
-    func update(displayID: CGDirectDisplayID, pixelBuffer: CVPixelBuffer) {
+    func update(displayID: CGDirectDisplayID, pixelBuffer: CVPixelBuffer, dirtyRects: [Rect]?) {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
@@ -416,7 +422,14 @@ private final class StreamingFrameStore: @unchecked Sendable {
         }
 
         condition.lock()
-        frames[displayID] = DisplayFrame(width: width, height: height, bytesPerRow: bytesPerRow, bgra: bytes)
+        sequence &+= 1
+        frames[displayID] = DisplayFrame(
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow,
+            bgra: bytes,
+            dirtyRects: dirtyRects
+        )
         condition.broadcast()
         condition.unlock()
     }
@@ -437,6 +450,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
     func snapshot() throws -> Framebuffer {
         condition.lock()
         let currentFrames = frames
+        let currentSequence = sequence
         condition.unlock()
 
         guard !currentFrames.isEmpty else {
@@ -449,14 +463,25 @@ private final class StreamingFrameStore: @unchecked Sendable {
            frame.width == layout.width,
            frame.height == layout.height,
            frame.bytesPerRow == layout.width * 4 {
-            return Framebuffer(width: layout.width, height: layout.height, bytesPerRow: frame.bytesPerRow, bgra: frame.bgra, layout: layout)
+            return Framebuffer(
+                width: layout.width,
+                height: layout.height,
+                bytesPerRow: frame.bytesPerRow,
+                bgra: frame.bgra,
+                layout: layout,
+                sequence: currentSequence,
+                dirtyRects: frame.dirtyRects
+            )
         }
 
         let bytesPerRow = layout.width * 4
         var pixels = [UInt8](repeating: 0, count: bytesPerRow * layout.height)
+        var combinedDirtyRects: [Rect] = []
+        var hasUnknownDirtyRects = false
 
         for display in layout.displays {
             guard let frame = currentFrames[display.id] else {
+                hasUnknownDirtyRects = true
                 continue
             }
 
@@ -467,6 +492,19 @@ private final class StreamingFrameStore: @unchecked Sendable {
             let copyHeight = min(frame.height, layout.height - destinationY)
             guard copyWidth > 0, copyHeight > 0 else {
                 continue
+            }
+
+            if let dirtyRects = frame.dirtyRects {
+                combinedDirtyRects.append(contentsOf: dirtyRects.map {
+                    Rect(
+                        x: destinationX + $0.x,
+                        y: destinationY + $0.y,
+                        width: $0.width,
+                        height: $0.height
+                    )
+                })
+            } else {
+                hasUnknownDirtyRects = true
             }
 
             for row in 0..<copyHeight {
@@ -484,7 +522,94 @@ private final class StreamingFrameStore: @unchecked Sendable {
             }
         }
 
-        return Framebuffer(width: layout.width, height: layout.height, bytesPerRow: bytesPerRow, bgra: pixels, layout: layout)
+        return Framebuffer(
+            width: layout.width,
+            height: layout.height,
+            bytesPerRow: bytesPerRow,
+            bgra: pixels,
+            layout: layout,
+            sequence: currentSequence,
+            dirtyRects: hasUnknownDirtyRects ? nil : combinedDirtyRects
+        )
+    }
+
+    func snapshot(displayIndex: Int) throws -> Framebuffer {
+        condition.lock()
+        let currentFrames = frames
+        let currentSequence = sequence
+        condition.unlock()
+
+        guard layout.displays.indices.contains(displayIndex - 1) else {
+            throw RFBError.captureFailed("display \(displayIndex) is not available")
+        }
+
+        let display = layout.displays[displayIndex - 1]
+        guard let frame = currentFrames[display.id] else {
+            throw RFBError.captureFailed("no ScreenCaptureKit frame available for display \(displayIndex)")
+        }
+
+        let displayLayout = VirtualDisplayLayout(displays: [display], scaleOverride: layout.scale)
+        if frame.width == displayLayout.width, frame.height == displayLayout.height {
+            return Framebuffer(
+                width: displayLayout.width,
+                height: displayLayout.height,
+                bytesPerRow: frame.bytesPerRow,
+                bgra: frame.bgra,
+                layout: displayLayout,
+                sequence: currentSequence,
+                dirtyRects: frame.dirtyRects
+            )
+        }
+
+        let bytesPerRow = displayLayout.width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * displayLayout.height)
+        let copyWidth = min(frame.width, displayLayout.width)
+        let copyHeight = min(frame.height, displayLayout.height)
+
+        for row in 0..<copyHeight {
+            let sourceOffset = row * frame.bytesPerRow
+            let destinationOffset = row * bytesPerRow
+            _ = pixels.withUnsafeMutableBytes { destination in
+                frame.bgra.withUnsafeBytes { source in
+                    memcpy(
+                        destination.baseAddress!.advanced(by: destinationOffset),
+                        source.baseAddress!.advanced(by: sourceOffset),
+                        copyWidth * 4
+                    )
+                }
+            }
+        }
+
+        return Framebuffer(
+            width: displayLayout.width,
+            height: displayLayout.height,
+            bytesPerRow: bytesPerRow,
+            bgra: pixels,
+            layout: displayLayout,
+            sequence: currentSequence,
+            dirtyRects: frame.dirtyRects
+        )
+    }
+}
+
+final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSource, InputRecoverySource {
+    private let source: StreamingScreenCapture
+    private let displayIndex: Int?
+
+    init(source: StreamingScreenCapture, displayIndex: Int?) {
+        self.source = source
+        self.displayIndex = displayIndex
+    }
+
+    func capture() throws -> Framebuffer {
+        if let displayIndex {
+            return try source.capture(displayIndex: displayIndex)
+        }
+        return try source.capture()
+    }
+
+    func requestRecoveryAfterInput() {
+        source.requestRecoveryAfterInput()
     }
 }
 
@@ -501,6 +626,48 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
         guard type == .screen, sampleBuffer.isValid, let pixelBuffer = sampleBuffer.imageBuffer else {
             return
         }
-        store.update(displayID: displayID, pixelBuffer: pixelBuffer)
+        let dirtyRects = Self.dirtyRects(
+            from: sampleBuffer,
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer)
+        )
+        store.update(displayID: displayID, pixelBuffer: pixelBuffer, dirtyRects: dirtyRects)
+    }
+
+    private static func dirtyRects(
+        from sampleBuffer: CMSampleBuffer,
+        width: Int,
+        height: Int
+    ) -> [Rect]? {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer,
+            createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+        let frameInfo = attachments.first,
+        let values = frameInfo[.dirtyRects] as? [NSValue] else {
+            return nil
+        }
+
+        var rects: [Rect] = []
+        for value in values {
+            let rect = value.rectValue
+            let x = max(0, Int(rect.minX.rounded(.down)))
+            let y = max(0, Int(rect.minY.rounded(.down)))
+            let right = min(width, Int(rect.maxX.rounded(.up)))
+            let bottom = min(height, Int(rect.maxY.rounded(.up)))
+            guard right > x, bottom > y else {
+                continue
+            }
+
+            let rectWidth = right - x
+            let rectHeight = bottom - y
+            rects.append(Rect(x: x, y: y, width: rectWidth, height: rectHeight))
+
+            let flippedY = max(0, height - bottom)
+            if flippedY != y {
+                rects.append(Rect(x: x, y: flippedY, width: rectWidth, height: rectHeight))
+            }
+        }
+        return rects
     }
 }

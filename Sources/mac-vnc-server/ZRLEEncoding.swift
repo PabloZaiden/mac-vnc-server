@@ -4,6 +4,8 @@ import zlib
 final class ZRLEEncoder {
     private var stream = z_stream()
     private var initialized = false
+    private var compressionLevel = Int32(Z_BEST_SPEED)
+    private var pendingOutput: [UInt8] = []
 
     init() throws {
         let status = deflateInit_(&stream, Z_BEST_SPEED, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
@@ -19,6 +21,40 @@ final class ZRLEEncoder {
         }
     }
 
+    func setCompressionLevel(_ level: Int32) throws {
+        guard (0...9).contains(Int(level)) else {
+            throw RFBError.protocolError("invalid zlib compression level \(level)")
+        }
+        guard level != compressionLevel else {
+            return
+        }
+
+        var chunk = [UInt8](repeating: 0, count: 16 * 1024)
+        stream.next_in = nil
+        stream.avail_in = 0
+
+        repeat {
+            let before = stream.total_out
+            let chunkCount = chunk.count
+            let status = chunk.withUnsafeMutableBytes { outputPointer in
+                stream.next_out = outputPointer.bindMemory(to: Bytef.self).baseAddress
+                stream.avail_out = uInt(chunkCount)
+                return zlib.deflateParams(&stream, level, Z_DEFAULT_STRATEGY)
+            }
+
+            guard status == Z_OK else {
+                throw RFBError.protocolError("ZRLE deflateParams failed with status \(status)")
+            }
+
+            let produced = Int(stream.total_out - before)
+            if produced > 0 {
+                pendingOutput.append(contentsOf: chunk.prefix(produced))
+            }
+        } while stream.avail_out == 0
+
+        compressionLevel = level
+    }
+
     func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
         guard pixelFormat.trueColor, pixelFormat.bitsPerPixel == 32 else {
             throw RFBError.unsupportedPixelFormat(pixelFormat)
@@ -30,17 +66,18 @@ final class ZRLEEncoder {
     }
 
     private func deflate(_ bytes: [UInt8]) throws -> [UInt8] {
-        var output: [UInt8] = []
+        var output = pendingOutput
+        pendingOutput.removeAll(keepingCapacity: true)
         output.reserveCapacity(max(1024, bytes.count / 3))
 
         var input = bytes
         let inputCount = input.count
+        var chunk = [UInt8](repeating: 0, count: 16 * 1024)
         try input.withUnsafeMutableBytes { inputPointer in
             stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
             stream.avail_in = uInt(inputCount)
 
             repeat {
-                var chunk = [UInt8](repeating: 0, count: 16 * 1024)
                 let chunkCount = chunk.count
                 let before = stream.total_out
                 let status = chunk.withUnsafeMutableBytes { outputPointer in
@@ -95,7 +132,7 @@ final class ZRLEEncoder {
                 let blue = framebuffer.bgra[offset]
                 let green = framebuffer.bgra[offset + 1]
                 let red = framebuffer.bgra[offset + 2]
-                output += pixelFormat.cPixelBytes(red: red, green: green, blue: blue)
+                pixelFormat.appendCPixelBytes(red: red, green: green, blue: blue, to: &output)
             }
         }
     }

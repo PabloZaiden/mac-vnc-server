@@ -8,6 +8,10 @@ final class ServerLogger: @unchecked Sendable {
         self.verbose = verbose
     }
 
+    var isVerbose: Bool {
+        verbose
+    }
+
     func info(_ message: String) {
         write(message, to: stdout)
     }

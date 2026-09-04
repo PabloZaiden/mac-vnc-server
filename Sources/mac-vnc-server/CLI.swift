@@ -50,10 +50,28 @@ enum CLICommand {
             return
         }
 
+        let sharedLogger = ServerLogger(verbose: config.verbose)
+        let sharedCapture = try await StreamingScreenCapture(
+            scale: config.scale,
+            fps: config.fps,
+            displaySelection: .all,
+            logger: sharedLogger
+        )
+
         for config in configs {
+            let capture: SelectedDisplayFramebufferSource
+            switch config.displaySelection {
+            case .all:
+                capture = SelectedDisplayFramebufferSource(source: sharedCapture, displayIndex: nil)
+            case .display(let displayIndex):
+                capture = SelectedDisplayFramebufferSource(source: sharedCapture, displayIndex: displayIndex)
+            case .automatic:
+                throw CLIError.invalidArgument("automatic display selection could not be expanded")
+            }
+
             Task.detached {
                 do {
-                    try await Self.runServer(config: config)
+                    try await Self.runServer(config: config, capture: capture)
                 } catch {
                     fputs("mac-vnc-server \(config.bindAddress):\(config.port): \(CLI.errorMessage(for: error))\n", stderr)
                     Foundation.exit(1)
@@ -86,19 +104,24 @@ enum CLICommand {
         return configs
     }
 
-    private static func runServer(config: ServerConfig) async throws {
+    private static func runServer(config: ServerConfig, capture: FramebufferSource? = nil) async throws {
         let logger = ServerLogger(verbose: config.verbose)
-        let capture = try await StreamingScreenCapture(
-            scale: config.scale,
-            fps: config.fps,
-            displaySelection: config.displaySelection,
-            logger: logger
-        )
+        let captureSource: FramebufferSource
+        if let capture {
+            captureSource = capture
+        } else {
+            captureSource = try await StreamingScreenCapture(
+                scale: config.scale,
+                fps: config.fps,
+                displaySelection: config.displaySelection,
+                logger: logger
+            )
+        }
         let input = MacInputController()
         let clipboard = MacClipboard()
         let server = RFBServer(
             config: config,
-            capture: capture,
+            capture: captureSource,
             input: input,
             clipboard: clipboard,
             logger: logger
@@ -142,12 +165,14 @@ enum CLI {
         var bindAddress = "127.0.0.1"
         var password: String? = "macvnc"
         var insecureAllowNoAuth = false
-        var fps = 30
+        var fps = 60
         var scale: Double = 1
         var encodingPreference = EncodingPreference.auto
         var displaySelection = DisplaySelection.automatic
         var verbose = false
         var clipboardSync = false
+        var adaptiveStreaming = true
+        var adaptiveFrameRate = true
         var index = 0
 
         while index < arguments.count {
@@ -177,10 +202,18 @@ enum CLI {
                 insecureAllowNoAuth = true
             case "--fps":
                 index += 1
-                guard index < arguments.count, let parsed = Int(arguments[index]), (1...120).contains(parsed) else {
-                    throw CLIError.invalidArgument("--fps requires a value between 1 and 120")
+                guard index < arguments.count else {
+                    throw CLIError.invalidArgument("--fps requires auto or a value between 1 and 120")
                 }
-                fps = parsed
+                if arguments[index] == "auto" {
+                    fps = 60
+                    adaptiveFrameRate = true
+                } else if let parsed = Int(arguments[index]), (1...120).contains(parsed) {
+                    fps = parsed
+                    adaptiveFrameRate = false
+                } else {
+                    throw CLIError.invalidArgument("--fps requires auto or a value between 1 and 120")
+                }
             case "--scale":
                 index += 1
                 guard index < arguments.count, let parsed = Double(arguments[index]), parsed > 0, parsed <= 4 else {
@@ -209,6 +242,9 @@ enum CLI {
                 verbose = true
             case "--clipboard-sync":
                 clipboardSync = true
+            case "--no-adaptive":
+                adaptiveStreaming = false
+                adaptiveFrameRate = false
             case "--help", "-h":
                 throw CLIError.helpRequested(helpText)
             default:
@@ -233,7 +269,9 @@ enum CLI {
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
             verbose: verbose,
-            clipboardSync: clipboardSync
+            clipboardSync: clipboardSync,
+            adaptiveStreaming: adaptiveStreaming,
+            adaptiveFrameRate: adaptiveFrameRate
         )
     }
 
@@ -255,8 +293,8 @@ enum CLI {
 
     Usage:
       mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
-                          [--fps 30] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
-                          [--display all|number] [--verbose] [--clipboard-sync]
+                          [--fps auto|1...120] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
+                          [--display all|number] [--verbose] [--clipboard-sync] [--no-adaptive]
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server wakeup
@@ -268,6 +306,7 @@ enum CLI {
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
     Use --clipboard-sync to enable basic text clipboard synchronization.
+    Use --no-adaptive to disable adaptive FPS and compression.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
@@ -303,7 +342,9 @@ private extension ServerConfig {
             encodingPreference: encodingPreference,
             displaySelection: displaySelection,
             verbose: verbose,
-            clipboardSync: clipboardSync
+            clipboardSync: clipboardSync,
+            adaptiveStreaming: adaptiveStreaming,
+            adaptiveFrameRate: adaptiveFrameRate
         )
     }
 }
