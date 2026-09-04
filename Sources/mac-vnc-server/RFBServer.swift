@@ -465,12 +465,9 @@ final class RFBClientSession: @unchecked Sendable {
         }
         let diffDuration = measureTimings ? Date().timeIntervalSince(diffStarted) : 0
 
-        let header = [0, 0] + UInt16(rects.count).beBytes
-        let writeStarted = DispatchTime.now().uptimeNanoseconds
-        try socket.writeAll(header)
-        var updateBytes = header.count
+        var encodedRects: [[UInt8]] = []
+        encodedRects.reserveCapacity(rects.count)
         var encodeDuration = 0.0
-        var writeDuration = elapsedSeconds(since: writeStarted)
 
         for rect in rects {
             let encodeStarted = DispatchTime.now().uptimeNanoseconds
@@ -494,6 +491,16 @@ final class RFBClientSession: @unchecked Sendable {
             rectResponse += UInt16(rect.height).beBytes
             rectResponse += encodingBytes
             rectResponse += payload
+            encodedRects.append(rectResponse)
+        }
+
+        let header = [0, 0] + UInt16(encodedRects.count).beBytes
+        let writeStarted = DispatchTime.now().uptimeNanoseconds
+        try socket.writeAll(header)
+        var updateBytes = header.count
+        var writeDuration = elapsedSeconds(since: writeStarted)
+
+        for rectResponse in encodedRects {
             let rectWriteStarted = DispatchTime.now().uptimeNanoseconds
             try socket.writeAll(rectResponse)
             writeDuration += elapsedSeconds(since: rectWriteStarted)
