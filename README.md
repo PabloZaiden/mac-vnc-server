@@ -6,7 +6,7 @@ The default setup is optimized for local testing with Apple Screen Sharing:
 
 - bind address: `127.0.0.1`
 - base port: `5900`
-- password: `macvnc`
+- password: generated and stored in `~/.mac-vnc-server/config.json`
 - FPS target: adaptive `60 -> 45 -> 30`
 - scale: `1.0`
 - encoding: `auto`
@@ -110,7 +110,7 @@ Default command:
 Equivalent explicit command:
 
 ```sh
-./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto --password macvnc
+./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto
 ```
 
 By default, the server exposes both the combined desktop and each display individually:
@@ -128,10 +128,10 @@ Connect with Apple Screen Sharing:
 open 'vnc://127.0.0.1:5900'
 ```
 
-Password:
+Password printed at startup:
 
 ```text
-macvnc
+VNC password: XXXXXXXX
 ```
 
 For unattended local testing, fill the native Screen Sharing password dialog with AppleScript:
@@ -139,7 +139,7 @@ For unattended local testing, fill the native Screen Sharing password dialog wit
 ```sh
 open 'vnc://127.0.0.1:5900'
 sleep 2
-osascript -e 'tell application "System Events" to keystroke "macvnc"' \
+osascript -e 'tell application "System Events" to keystroke "XXXXXXXX"' \
           -e 'tell application "System Events" to key code 36'
 ```
 
@@ -150,13 +150,13 @@ Do not store test credentials in Keychain unless you explicitly want that behavi
 Bind all interfaces:
 
 ```sh
-./.build/release/mac-vnc-server --bind 0.0.0.0 --port 5900 --password macvnc
+./.build/release/mac-vnc-server --bind 0.0.0.0 --port 5900 --password '<your-password>'
 ```
 
 Or bind a specific LAN IP:
 
 ```sh
-./.build/release/mac-vnc-server --bind 192.168.1.10 --port 5900 --password macvnc
+./.build/release/mac-vnc-server --bind 192.168.1.10 --port 5900 --password '<your-password>'
 ```
 
 The server refuses unauthenticated non-loopback binds by default. To disable auth for clients that support unauthenticated VNC, you must opt in explicitly:
@@ -193,7 +193,7 @@ Options:
 | --- | --- | --- |
 | `--bind <ipv4>` | `127.0.0.1` | IPv4 address to listen on. |
 | `--port <port>` / `-p <port>` | `5900` | TCP port, or base port when `--display` is omitted. |
-| `--password <value>` | `macvnc` | Classic VNC auth password. |
+| `--password <value>` | config file | Override the generated/configured classic VNC auth password for this run. |
 | `--no-password` | off | Use unauthenticated VNC. Apple Screen Sharing does not accept this path. |
 | `--insecure-allow-no-auth` | off | Required with `--no-password` on non-loopback binds. |
 | `--fps <auto\|1...120>` | `auto` | Adaptive `60 -> 45 -> 30` target, or a fixed framebuffer update rate when an explicit number is provided. |
@@ -203,6 +203,16 @@ Options:
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 | `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
 | `--no-adaptive` | off | Disable adaptive FPS and compression. |
+
+### Password configuration
+
+On the first authenticated run, the server generates an 8-character ASCII password and stores it in:
+
+```text
+~/.mac-vnc-server/config.json
+```
+
+The directory is created with permissions `0700` and the file with `0600`. The password is printed to stdout at startup. Subsequent runs reuse the same value. Use `--password <value>` for a one-off override, or `--no-password` for an explicitly unauthenticated server.
 
 ### Display modes
 
@@ -248,13 +258,15 @@ The server implements the RFB handshake and core client messages:
 - `PointerEvent`
 - `ClientCutText`
 
-Apple Screen Sharing negotiates RFB 3.3 and requires VNC auth, so the default password is enabled.
+Apple Screen Sharing negotiates RFB 3.3 and requires VNC auth, so authentication is enabled by default.
 
 ### Capture pipeline
 
 Screen capture uses `ScreenCaptureKit` with one stream per selected display. Captured frames are stored in BGRA format and composed into a virtual framebuffer. The virtual framebuffer supports multiple displays and maps VNC coordinates back to macOS global coordinates for mouse input.
 
 If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification`, when an active `SCStream` reports `didStopWithError`, or when input arrives after a failed recovery. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
+
+When a client or network cannot consume updates quickly enough, the server keeps only the newest captured frame and drops stale frames before sending their RFB update header. Persistent Zlib/ZRLE state is transactional, so a dropped frame cannot desynchronize the stream. Client sockets use non-blocking writes with a five-second no-progress timeout; a connection that makes no write progress is closed instead of blocking the capture pipeline indefinitely. Adaptive sessions also lower the capture rate from 60 to 45 to 30 FPS when network backpressure is detected, while shared capture streams use the highest rate requested by their active clients.
 
 ### Encodings
 
@@ -266,6 +278,7 @@ If macOS sleeps the screens while the server is running, the capture streams are
 - fallback: Raw (`0`)
 
 Zlib is kept as a persistent stream per VNC connection, which is required for stable compressed updates with Apple Screen Sharing.
+Adaptive compression prioritizes sender throughput: it uses level 1 when encoding is the bottleneck and at most level 3 when the network is the bottleneck. It does not automatically switch to high compression levels during video or animation.
 
 ### Input
 
@@ -314,10 +327,10 @@ Runs when a GitHub Release is published:
 
 ### Apple Screen Sharing keeps asking for a password
 
-The default password is printed on server startup:
+The generated password is printed on server startup:
 
 ```text
-password=macvnc
+VNC password: XXXXXXXX
 ```
 
 For scripted testing, use AppleScript to type it instead of Keychain.

@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Testing
 import zlib
 @testable import mac_vnc_server
@@ -39,6 +40,87 @@ import zlib
 
     #expect(config.fps == 60)
     #expect(config.adaptiveFrameRate)
+}
+
+@Test func cliUsesGeneratedPasswordConfigByDefault() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.password == nil)
+    #expect(config.passwordFromConfig)
+}
+
+@Test func cliAcceptsExplicitPasswordOverride() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--password", "override"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.password == "override")
+    #expect(!config.passwordFromConfig)
+}
+
+@Test func cliKeepsNoPasswordAsExplicitOverride() throws {
+    guard case .run(let config) = try CLI.parse(arguments: ["run", "--no-password"]) else {
+        Issue.record("expected run command")
+        return
+    }
+
+    #expect(config.password == nil)
+    #expect(!config.passwordFromConfig)
+}
+
+@Test func passwordStoreCreatesAndReusesEightBytePassword() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mac-vnc-server-password-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let firstPassword = try PasswordStore.loadOrCreate(in: directory)
+    let secondPassword = try PasswordStore.loadOrCreate(in: directory)
+    let fileURL = directory.appendingPathComponent(PasswordStore.configFileName)
+    let fileAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+    let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+
+    #expect(firstPassword == secondPassword)
+    #expect(firstPassword.utf8.count == PasswordStore.passwordLength)
+    #expect((fileAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    #expect((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+}
+
+@Test func passwordStoreRejectsSymlinkedPaths() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("mac-vnc-server-password-links-\(UUID().uuidString)", isDirectory: true)
+    let fileManager = FileManager.default
+    defer { try? fileManager.removeItem(at: root) }
+
+    let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
+    let linkedDirectory = root.appendingPathComponent("config-directory", isDirectory: true)
+    try fileManager.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(at: linkedDirectory, withDestinationURL: targetDirectory)
+
+    var rejectedDirectoryLink = false
+    do {
+        _ = try PasswordStore.loadOrCreate(in: linkedDirectory)
+    } catch {
+        rejectedDirectoryLink = true
+    }
+    #expect(rejectedDirectoryLink)
+
+    try fileManager.removeItem(at: linkedDirectory)
+    let configURL = targetDirectory.appendingPathComponent(PasswordStore.configFileName)
+    let targetURL = targetDirectory.appendingPathComponent("target.json")
+    try Data(#"{"password":"ABCDEFGH"}"#.utf8).write(to: targetURL)
+    try fileManager.createSymbolicLink(at: configURL, withDestinationURL: targetURL)
+
+    var rejectedFileLink = false
+    do {
+        _ = try PasswordStore.loadOrCreate(in: targetDirectory)
+    } catch {
+        rejectedFileLink = true
+    }
+    #expect(rejectedFileLink)
 }
 
 @Test func cliParsesFixedFrameRate() throws {
@@ -328,6 +410,113 @@ import zlib
     ])
 }
 
+@Test func discardedZlibTransactionDoesNotAdvanceStream() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
+    let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
+        0x03, 0x02, 0x01, 0xff,
+        0x06, 0x05, 0x04, 0xff
+    ], layout: layout)
+    let rect = Rect(x: 0, y: 0, width: 2, height: 1)
+    let encoder = try ZlibEncoder()
+
+    do {
+        let transaction = try encoder.beginTransaction()
+        _ = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    }
+
+    let payload = try encoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    #expect(try inflatePayloads([payload], outputCounts: [8]) == [
+        0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00
+    ])
+}
+
+@Test func committedZlibTransactionContinuesStream() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
+    let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
+        0x03, 0x02, 0x01, 0xff,
+        0x06, 0x05, 0x04, 0xff
+    ], layout: layout)
+    let rect = Rect(x: 0, y: 0, width: 2, height: 1)
+    let encoder = try ZlibEncoder()
+    let transaction = try encoder.beginTransaction()
+    let first = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    try encoder.commit(transaction)
+    let second = try encoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+
+    #expect(try inflatePayloads([first, second], outputCounts: [8, 8]) == [
+        0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00,
+        0x03, 0x02, 0x01, 0x00, 0x06, 0x05, 0x04, 0x00
+    ])
+}
+
+@Test func discardedZRLETransactionDoesNotAdvanceStream() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
+    let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
+        0x03, 0x02, 0x01, 0xff,
+        0x06, 0x05, 0x04, 0xff
+    ], layout: layout)
+    let rect = Rect(x: 0, y: 0, width: 2, height: 1)
+    let encoder = try ZRLEEncoder()
+
+    do {
+        let transaction = try encoder.beginTransaction()
+        _ = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    }
+
+    let payload = try encoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    #expect(try inflatePayloads([payload], outputCounts: [7]) == [
+        0, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04
+    ])
+}
+
+@Test func committedZRLETransactionContinuesStream() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
+    let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
+        0x03, 0x02, 0x01, 0xff,
+        0x06, 0x05, 0x04, 0xff
+    ], layout: layout)
+    let rect = Rect(x: 0, y: 0, width: 2, height: 1)
+    let encoder = try ZRLEEncoder()
+    let transaction = try encoder.beginTransaction()
+    let first = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+    try encoder.commit(transaction)
+    let second = try encoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: .serverDefault)
+
+    #expect(try inflatePayloads([first, second], outputCounts: [7, 7]) == [
+        0, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04,
+        0, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04
+    ])
+}
+
+@Test func clientSocketWriteTimesOutWithoutPeerProgress() throws {
+    var descriptors = [Int32](repeating: -1, count: 2)
+    guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+        Issue.record("socketpair failed: \(String(cString: strerror(errno)))")
+        return
+    }
+    defer { close(descriptors[1]) }
+
+    var sendBufferSize: Int32 = 4 * 1024
+    setsockopt(
+        descriptors[0],
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &sendBufferSize,
+        socklen_t(MemoryLayout<Int32>.size)
+    )
+
+    let socket = try ClientSocket(fd: descriptors[0])
+    let payload = [UInt8](repeating: 0, count: 4 * 1024 * 1024)
+    var didTimeout = false
+    do {
+        try socket.writeAll(payload, idleTimeout: 0.05)
+    } catch {
+        didTimeout = true
+    }
+
+    #expect(didTimeout)
+}
+
 @Test func zrleEncodingUsesRawTilesWithCPixels() throws {
     let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 2, height: 1)
     let framebuffer = Framebuffer(width: 2, height: 1, bgra: [
@@ -468,4 +657,40 @@ import zlib
     #expect(layout.width == 400)
     #expect(layout.height == 200)
     #expect(layout.globalPoint(framebufferX: 200, framebufferY: 100) == CGPoint(x: 0, y: 100))
+}
+
+private func inflatePayloads(_ payloads: [[UInt8]], outputCounts: [Int]) throws -> [UInt8] {
+    guard payloads.count == outputCounts.count else {
+        throw RFBError.protocolError("test payload count mismatch")
+    }
+
+    var stream = z_stream()
+    guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+        throw RFBError.protocolError("test inflateInit failed")
+    }
+    defer { inflateEnd(&stream) }
+
+    var result: [UInt8] = []
+    for (payload, outputCount) in zip(payloads, outputCounts) {
+        guard payload.count >= 4 else {
+            throw RFBError.protocolError("test payload is missing its length")
+        }
+        let compressedLength = Int(UInt32.be(payload[0], payload[1], payload[2], payload[3]))
+        var compressed = Array(payload.dropFirst(4))
+        var output = [UInt8](repeating: 0, count: outputCount)
+        let status = compressed.withUnsafeMutableBytes { inputPointer in
+            output.withUnsafeMutableBytes { outputPointer in
+                stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
+                stream.avail_in = uInt(compressedLength)
+                stream.next_out = outputPointer.bindMemory(to: Bytef.self).baseAddress
+                stream.avail_out = uInt(outputCount)
+                return inflate(&stream, Z_SYNC_FLUSH)
+            }
+        }
+        guard status == Z_OK else {
+            throw RFBError.protocolError("test inflate failed with status \(status)")
+        }
+        result += output.prefix(outputCount - Int(stream.avail_out))
+    }
+    return result
 }

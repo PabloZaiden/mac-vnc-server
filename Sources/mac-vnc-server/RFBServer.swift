@@ -1,10 +1,10 @@
 import Foundation
-import zlib
 
 struct ServerConfig {
     let bindAddress: String
     let port: UInt16
     let password: String?
+    let passwordFromConfig: Bool
     let fps: Int
     let scale: Double
     let encodingPreference: EncodingPreference
@@ -150,12 +150,38 @@ struct AdaptiveFrameRateController {
         index -= 1
         return frameRate
     }
+
+    mutating func reduceForBackpressure() -> Int? {
+        slowFrameStreak = 0
+        fastFrameStreak = 0
+        guard index + 1 < Self.frameRates.count else {
+            return nil
+        }
+        index += 1
+        return frameRate
+    }
 }
 
 final class RFBClientSession: @unchecked Sendable {
     private struct FramebufferUpdateRequest {
         let incremental: Bool
         let rect: Rect
+    }
+
+    private enum EncodingTransaction {
+        case zlib(ZlibEncoder.Transaction)
+        case zrle(ZRLEEncoder.Transaction)
+    }
+
+    private struct PreparedFramebufferUpdate {
+        let framebuffer: Framebuffer
+        let encoding: RFBEncoding
+        let rects: [Rect]
+        let encodedRects: [[UInt8]]
+        let captureDuration: TimeInterval
+        let diffDuration: TimeInterval
+        let encodeDuration: TimeInterval
+        let transaction: EncodingTransaction?
     }
 
     private let socket: ClientSocket
@@ -184,6 +210,8 @@ final class RFBClientSession: @unchecked Sendable {
     private var latestUpdateRequest: FramebufferUpdateRequest?
     private var activeUpdateRequest: FramebufferUpdateRequest?
     private var writerError: Error?
+    private var captureRateConsumer: ObjectIdentifier?
+    private var networkStallNotifications = 0
     private var updatesSent = 0
     private var bytesSent = 0
     private var adaptiveFrameRateController = AdaptiveFrameRateController()
@@ -223,8 +251,19 @@ final class RFBClientSession: @unchecked Sendable {
         previousFramebuffer = initialFrame
 
         try handshake(initialFrame: initialFrame)
+        let captureRateConsumer = ObjectIdentifier(self)
+        self.captureRateConsumer = captureRateConsumer
+        (capture as? CaptureFrameRateController)?.registerCaptureRateConsumer(
+            captureRateConsumer,
+            fps: Int((1.0 / minimumFrameInterval).rounded())
+        )
         startFramebufferWriter()
-        defer { stopFramebufferWriter() }
+        defer {
+            stopFramebufferWriter()
+            if let captureRateConsumer = self.captureRateConsumer {
+                (capture as? CaptureFrameRateController)?.unregisterCaptureRateConsumer(captureRateConsumer)
+            }
+        }
 
         while true {
             if let writerError = consumeWriterError() {
@@ -372,6 +411,7 @@ final class RFBClientSession: @unchecked Sendable {
             do {
                 try framebufferWriterLoop()
             } catch {
+                socket.shutdown()
                 state.lock()
                 writerError = error
                 stopped = true
@@ -423,6 +463,7 @@ final class RFBClientSession: @unchecked Sendable {
         stopped = true
         state.broadcast()
         state.unlock()
+        socket.shutdown()
     }
 
     private func sendFramebufferUpdate(_ request: FramebufferUpdateRequest) throws {
@@ -430,14 +471,93 @@ final class RFBClientSession: @unchecked Sendable {
         let frameStarted = Date()
         let measureTimings = logger.isVerbose
 
+        var staleRetries = 0
+        var captureDuration = 0.0
+        var diffDuration = 0.0
+        let prepared: PreparedFramebufferUpdate
+
+        while true {
+            let candidate = try prepareFramebufferUpdate(request, measureTimings: measureTimings)
+            if measureTimings {
+                captureDuration += candidate.captureDuration
+                diffDuration += candidate.diffDuration
+            }
+
+            if staleRetries < 2, try isStale(candidate.framebuffer) {
+                staleRetries += 1
+                continue
+            }
+
+            prepared = candidate
+            break
+        }
+
+        if let transaction = prepared.transaction {
+            try commit(transaction)
+        }
+
+        let header = [0, 0] + UInt16(prepared.encodedRects.count).beBytes
+        let writeStarted = DispatchTime.now().uptimeNanoseconds
+        try socket.writeAll(header, onStall: { [self] in
+            noteNetworkStall()
+        })
+        var updateBytes = header.count
+        var writeDuration = elapsedSeconds(since: writeStarted)
+
+        for rectResponse in prepared.encodedRects {
+            let rectWriteStarted = DispatchTime.now().uptimeNanoseconds
+            try socket.writeAll(rectResponse, onStall: { [self] in
+                noteNetworkStall()
+            })
+            writeDuration += elapsedSeconds(since: rectWriteStarted)
+            updateBytes += rectResponse.count
+        }
+
+        let frameDuration = Date().timeIntervalSince(frameStarted)
+        state.lock()
+        updatesSent += 1
+        bytesSent += updateBytes
+        if measureTimings && (updatesSent == 1 || updatesSent % 60 == 0) {
+            logger.verbose(
+                "updates=\(updatesSent) encoding=\(prepared.encoding) last_rects=\(prepared.rects.count) " +
+                "bytes=\(updateBytes) total_bytes=\(bytesSent) " +
+                "frame_ms=\(Int(frameDuration * 1_000)) " +
+                "capture_ms=\(Int(captureDuration * 1_000)) " +
+                "diff_ms=\(Int(diffDuration * 1_000)) " +
+                "encode_ms=\(Int(prepared.encodeDuration * 1_000)) " +
+                "write_ms=\(Int(writeDuration * 1_000))"
+            )
+        }
+        previousFramebuffer = prepared.framebuffer
+        currentLayout = prepared.framebuffer.layout
+        hasSentFramebufferUpdate = true
+        networkStallNotifications = 0
+        state.unlock()
+
+        try adaptStreaming(
+            frameDuration: frameDuration,
+            encodeDuration: prepared.encodeDuration,
+            writeDuration: writeDuration,
+            encoding: prepared.encoding
+        )
+        adaptFrameRate(frameDuration: frameDuration)
+
+        if clipboardSync, let text = clipboard.localTextIfChanged() {
+            try sendServerCutText(text)
+        }
+    }
+
+    private func prepareFramebufferUpdate(
+        _ request: FramebufferUpdateRequest,
+        measureTimings: Bool
+    ) throws -> PreparedFramebufferUpdate {
         let captureStarted = measureTimings ? Date() : .distantPast
         let framebuffer = try capture.capture()
         let captureDuration = measureTimings ? Date().timeIntervalSince(captureStarted) : 0
         let requested = request.rect
         let (format, encoding, previous, sentBefore) = stateSnapshotForEncoding()
-        let shouldDiff = sentBefore
-            && request.incremental
-        let diffStarted = measureTimings ? Date() : .distantPast
+        let shouldDiff = sentBefore && request.incremental
+        let diffStarted = logger.isVerbose ? Date() : .distantPast
         let dirtyRects: [Rect]?
         if shouldDiff,
            let previous,
@@ -448,6 +568,7 @@ final class RFBClientSession: @unchecked Sendable {
         } else {
             dirtyRects = nil
         }
+
         let rects: [Rect]
         if shouldDiff,
            let previous,
@@ -463,7 +584,16 @@ final class RFBClientSession: @unchecked Sendable {
                 dirtyRects: dirtyRects
             )
         }
-        let diffDuration = measureTimings ? Date().timeIntervalSince(diffStarted) : 0
+        let diffDuration = logger.isVerbose ? Date().timeIntervalSince(diffStarted) : 0
+        let transaction: EncodingTransaction?
+        switch encoding {
+        case .zlib:
+            transaction = .zlib(try zlibEncoder.beginTransaction())
+        case .zrle:
+            transaction = .zrle(try zrleEncoder.beginTransaction())
+        case .raw:
+            transaction = nil
+        }
 
         var encodedRects: [[UInt8]] = []
         encodedRects.reserveCapacity(rects.count)
@@ -475,9 +605,17 @@ final class RFBClientSession: @unchecked Sendable {
             let encodingBytes = UInt32(bitPattern: encoding.rawValue).beBytes
             switch encoding {
             case .zrle:
-                payload = try zrleEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+                if case .zrle(let transaction) = transaction {
+                    payload = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+                } else {
+                    throw RFBError.protocolError("missing ZRLE encoding transaction")
+                }
             case .zlib:
-                payload = try zlibEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+                if case .zlib(let transaction) = transaction {
+                    payload = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
+                } else {
+                    throw RFBError.protocolError("missing Zlib encoding transaction")
+                }
             case .raw:
                 payload = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
             }
@@ -494,49 +632,40 @@ final class RFBClientSession: @unchecked Sendable {
             encodedRects.append(rectResponse)
         }
 
-        let header = [0, 0] + UInt16(encodedRects.count).beBytes
-        let writeStarted = DispatchTime.now().uptimeNanoseconds
-        try socket.writeAll(header)
-        var updateBytes = header.count
-        var writeDuration = elapsedSeconds(since: writeStarted)
-
-        for rectResponse in encodedRects {
-            let rectWriteStarted = DispatchTime.now().uptimeNanoseconds
-            try socket.writeAll(rectResponse)
-            writeDuration += elapsedSeconds(since: rectWriteStarted)
-            updateBytes += rectResponse.count
-        }
-
-        let frameDuration = Date().timeIntervalSince(frameStarted)
-        state.lock()
-        updatesSent += 1
-        bytesSent += updateBytes
-        if measureTimings && (updatesSent == 1 || updatesSent % 60 == 0) {
-            logger.verbose(
-                "updates=\(updatesSent) encoding=\(encoding) last_rects=\(rects.count) " +
-                "bytes=\(updateBytes) total_bytes=\(bytesSent) " +
-                "frame_ms=\(Int(frameDuration * 1_000)) " +
-                "capture_ms=\(Int(captureDuration * 1_000)) " +
-                "diff_ms=\(Int(diffDuration * 1_000)) " +
-                "encode_ms=\(Int(encodeDuration * 1_000)) " +
-                "write_ms=\(Int(writeDuration * 1_000))"
-            )
-        }
-        previousFramebuffer = framebuffer
-        currentLayout = framebuffer.layout
-        hasSentFramebufferUpdate = true
-        state.unlock()
-
-        try adaptStreaming(
-            frameDuration: frameDuration,
+        return PreparedFramebufferUpdate(
+            framebuffer: framebuffer,
+            encoding: encoding,
+            rects: rects,
+            encodedRects: encodedRects,
+            captureDuration: captureDuration,
+            diffDuration: diffDuration,
             encodeDuration: encodeDuration,
-            writeDuration: writeDuration,
-            encoding: encoding
+            transaction: transaction
         )
-        adaptFrameRate(frameDuration: frameDuration)
+    }
 
-        if clipboardSync, let text = clipboard.localTextIfChanged() {
-            try sendServerCutText(text)
+    private func isStale(_ framebuffer: Framebuffer) throws -> Bool {
+        guard let sequence = framebuffer.sequence else {
+            return false
+        }
+        let latestSequence: UInt64?
+        if let sequenceSource = capture as? FramebufferSequenceSource {
+            latestSequence = try sequenceSource.currentSequence()
+        } else {
+            latestSequence = try capture.capture().sequence
+        }
+        guard let latestSequence else {
+            return false
+        }
+        return latestSequence != sequence
+    }
+
+    private func commit(_ transaction: EncodingTransaction) throws {
+        switch transaction {
+        case .zlib(let transaction):
+            try zlibEncoder.commit(transaction)
+        case .zrle(let transaction):
+            try zrleEncoder.commit(transaction)
         }
     }
 
@@ -608,8 +737,7 @@ final class RFBClientSession: @unchecked Sendable {
         if encodeDuration >= writeDuration {
             try setCompressionLevel(1, for: encoding)
         } else {
-            let level: Int32 = frameDuration > target * 2.5 ? 6 : 3
-            try setCompressionLevel(level, for: encoding)
+            try setCompressionLevel(3, for: encoding)
         }
     }
 
@@ -623,7 +751,37 @@ final class RFBClientSession: @unchecked Sendable {
         }
 
         frameInterval = 1.0 / Double(frameRate)
+        if let captureRateConsumer {
+            (capture as? CaptureFrameRateController)?.updateCaptureRate(
+                frameRate,
+                consumer: captureRateConsumer
+            )
+        }
         logger.verbose("adaptive fps changed to \(frameRate)")
+    }
+
+    private func noteNetworkStall() {
+        guard adaptiveFrameRate else {
+            return
+        }
+
+        networkStallNotifications += 1
+        guard networkStallNotifications >= 2 else {
+            return
+        }
+        networkStallNotifications = 0
+        guard let frameRate = adaptiveFrameRateController.reduceForBackpressure() else {
+            return
+        }
+
+        frameInterval = 1.0 / Double(frameRate)
+        if let captureRateConsumer {
+            (capture as? CaptureFrameRateController)?.updateCaptureRate(
+                frameRate,
+                consumer: captureRateConsumer
+            )
+        }
+        logger.verbose("adaptive fps changed to \(frameRate) due to network backpressure")
     }
 
     private func elapsedSeconds(since start: UInt64) -> TimeInterval {

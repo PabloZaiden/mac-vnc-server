@@ -5,7 +5,7 @@ import AppKit
 import Foundation
 import ScreenCaptureKit
 
-final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, InputRecoverySource {
+final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, FramebufferSequenceSource, InputRecoverySource, CaptureFrameRateController {
     private let scale: CGFloat
     private let fps: Int
     private let displaySelection: DisplaySelection
@@ -15,8 +15,13 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
     private let recoveryLock = NSLock()
     private var store: StreamingFrameStore
     private var streams: [SCStream]
+    private var streamConfigurations: [SCStreamConfiguration]
     private var outputs: [ScreenCaptureStreamOutput]
     private var delegates: [ScreenCaptureStreamDelegate]
+    private let captureRateLock = NSLock()
+    private var captureRateRequests: [ObjectIdentifier: Int] = [:]
+    private var desiredCaptureFPS: Int
+    private var captureRateTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
     private var recoveryScheduled = false
     private var recoveryNeeded = false
@@ -32,6 +37,8 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         self.fps = fps
         self.displaySelection = displaySelection
         self.logger = logger
+        desiredCaptureFPS = fps
+        captureRateTask = nil
 
         let eventSink = StreamEventSink()
         let started = try await Self.start(
@@ -50,6 +57,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         streamEventSink = eventSink
         store = started.store
         streams = started.streams
+        streamConfigurations = started.configurations
         outputs = started.outputs
         delegates = started.delegates
         eventSink.attach(owner: self)
@@ -76,6 +84,14 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         try currentStore().snapshot(displayIndex: displayIndex)
     }
 
+    func currentSequence() throws -> UInt64? {
+        try currentStore().currentSequence()
+    }
+
+    func currentSequence(displayIndex: Int) throws -> UInt64? {
+        try currentStore().currentSequence(displayIndex: displayIndex)
+    }
+
     func requestRecoveryAfterInput() {
         recoveryLock.lock()
         let needed = recoveryNeeded
@@ -86,6 +102,45 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         }
         scheduleDisplayWakeup()
         scheduleRecovery(reason: "input received")
+    }
+
+    func registerCaptureRateConsumer(_ consumer: ObjectIdentifier, fps: Int) {
+        captureRateLock.lock()
+        captureRateRequests[consumer] = fps
+        let target = effectiveCaptureFPSLocked()
+        let shouldSchedule = target != desiredCaptureFPS
+        desiredCaptureFPS = target
+        captureRateLock.unlock()
+
+        if shouldSchedule {
+            scheduleCaptureRateUpdate()
+        }
+    }
+
+    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier) {
+        captureRateLock.lock()
+        captureRateRequests[consumer] = fps
+        let target = effectiveCaptureFPSLocked()
+        let shouldSchedule = target != desiredCaptureFPS
+        desiredCaptureFPS = target
+        captureRateLock.unlock()
+
+        if shouldSchedule {
+            scheduleCaptureRateUpdate()
+        }
+    }
+
+    func unregisterCaptureRateConsumer(_ consumer: ObjectIdentifier) {
+        captureRateLock.lock()
+        captureRateRequests.removeValue(forKey: consumer)
+        let target = effectiveCaptureFPSLocked()
+        let shouldSchedule = target != desiredCaptureFPS
+        desiredCaptureFPS = target
+        captureRateLock.unlock()
+
+        if shouldSchedule {
+            scheduleCaptureRateUpdate()
+        }
     }
 
     private func scheduleDisplayWakeup() {
@@ -124,6 +179,64 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         return store
     }
 
+    private func effectiveCaptureFPSLocked() -> Int {
+        captureRateRequests.values.max() ?? fps
+    }
+
+    private func scheduleCaptureRateUpdate() {
+        captureRateLock.lock()
+        guard captureRateTask == nil else {
+            captureRateLock.unlock()
+            return
+        }
+        captureRateTask = Task { [weak self] in
+            await self?.applyCaptureRateUpdates()
+        }
+        captureRateLock.unlock()
+    }
+
+    private func applyCaptureRateUpdates() async {
+        while true {
+            let target = captureRateTarget()
+            let (currentStreams, currentConfigurations) = streamConfigurationSnapshot()
+
+            for (stream, configuration) in zip(currentStreams, currentConfigurations) {
+                configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(target))
+                do {
+                    try await stream.updateConfiguration(configuration)
+                } catch {
+                    logger.warning("ScreenCaptureKit frame-rate update to \(target) FPS failed: \(error.localizedDescription)")
+                }
+            }
+
+            if finishCaptureRateUpdateIfUnchanged(target) {
+                return
+            }
+        }
+    }
+
+    private func captureRateTarget() -> Int {
+        captureRateLock.lock()
+        defer { captureRateLock.unlock() }
+        return desiredCaptureFPS
+    }
+
+    private func streamConfigurationSnapshot() -> ([SCStream], [SCStreamConfiguration]) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return (streams, streamConfigurations)
+    }
+
+    private func finishCaptureRateUpdateIfUnchanged(_ target: Int) -> Bool {
+        captureRateLock.lock()
+        defer { captureRateLock.unlock() }
+        guard desiredCaptureFPS == target else {
+            return false
+        }
+        captureRateTask = nil
+        return true
+    }
+
     static func displayCount() async throws -> Int {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         return content.displays.count
@@ -153,6 +266,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         let layout = VirtualDisplayLayout(displays: displays, scaleOverride: scale)
         let store = StreamingFrameStore(layout: layout, expectedDisplayIDs: Set(displays.map(\.id)))
         var streams: [SCStream] = []
+        var configurations: [SCStreamConfiguration] = []
         var outputs: [ScreenCaptureStreamOutput] = []
         var delegates: [ScreenCaptureStreamDelegate] = []
 
@@ -179,6 +293,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
                     sampleHandlerQueue: DispatchQueue(label: "mac-vnc-server.sck.\(display.displayID)")
                 )
                 streams.append(stream)
+                configurations.append(config)
                 outputs.append(output)
                 delegates.append(delegate)
                 try await stream.startCapture()
@@ -188,7 +303,13 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
             throw error
         }
 
-        return StartedCapture(store: store, streams: streams, outputs: outputs, delegates: delegates)
+        return StartedCapture(
+            store: store,
+            streams: streams,
+            configurations: configurations,
+            outputs: outputs,
+            delegates: delegates
+        )
     }
 
     private func scheduleRecovery(reason: String) {
@@ -278,9 +399,11 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
         stateLock.lock()
         store = started.store
         streams = started.streams
+        streamConfigurations = started.configurations
         outputs = started.outputs
         delegates = started.delegates
         stateLock.unlock()
+        scheduleCaptureRateUpdate()
     }
 
     private func finishRecoveryScheduling() {
@@ -336,6 +459,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Inpu
 private struct StartedCapture {
     let store: StreamingFrameStore
     let streams: [SCStream]
+    let configurations: [SCStreamConfiguration]
     let outputs: [ScreenCaptureStreamOutput]
     let delegates: [ScreenCaptureStreamDelegate]
 }
@@ -385,6 +509,7 @@ private final class ScreenCaptureStreamDelegate: NSObject, SCStreamDelegate {
 }
 
 private struct DisplayFrame {
+    let sequence: UInt64
     let width: Int
     let height: Int
     let bytesPerRow: Int
@@ -397,6 +522,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
     private let layout: VirtualDisplayLayout
     private let expectedDisplayIDs: Set<CGDirectDisplayID>
     private var frames: [CGDirectDisplayID: DisplayFrame] = [:]
+    private var displaySequences: [CGDirectDisplayID: UInt64] = [:]
     private var sequence: UInt64 = 0
 
     init(layout: VirtualDisplayLayout, expectedDisplayIDs: Set<CGDirectDisplayID>) {
@@ -423,7 +549,10 @@ private final class StreamingFrameStore: @unchecked Sendable {
 
         condition.lock()
         sequence &+= 1
+        let displaySequence = (displaySequences[displayID] ?? 0) &+ 1
+        displaySequences[displayID] = displaySequence
         frames[displayID] = DisplayFrame(
+            sequence: displaySequence,
             width: width,
             height: height,
             bytesPerRow: bytesPerRow,
@@ -533,10 +662,31 @@ private final class StreamingFrameStore: @unchecked Sendable {
         )
     }
 
+    func currentSequence() throws -> UInt64? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard !frames.isEmpty else {
+            throw RFBError.captureFailed("no ScreenCaptureKit frame available yet")
+        }
+        return sequence
+    }
+
+    func currentSequence(displayIndex: Int) throws -> UInt64? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard layout.displays.indices.contains(displayIndex - 1) else {
+            throw RFBError.captureFailed("display \(displayIndex) is not available")
+        }
+        let display = layout.displays[displayIndex - 1]
+        guard let frame = frames[display.id] else {
+            throw RFBError.captureFailed("no ScreenCaptureKit frame available for display \(displayIndex)")
+        }
+        return frame.sequence
+    }
+
     func snapshot(displayIndex: Int) throws -> Framebuffer {
         condition.lock()
         let currentFrames = frames
-        let currentSequence = sequence
         condition.unlock()
 
         guard layout.displays.indices.contains(displayIndex - 1) else {
@@ -556,7 +706,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
                 bytesPerRow: frame.bytesPerRow,
                 bgra: frame.bgra,
                 layout: displayLayout,
-                sequence: currentSequence,
+                sequence: frame.sequence,
                 dirtyRects: frame.dirtyRects
             )
         }
@@ -586,13 +736,13 @@ private final class StreamingFrameStore: @unchecked Sendable {
             bytesPerRow: bytesPerRow,
             bgra: pixels,
             layout: displayLayout,
-            sequence: currentSequence,
+            sequence: frame.sequence,
             dirtyRects: frame.dirtyRects
         )
     }
 }
 
-final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSource, InputRecoverySource {
+final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSource, FramebufferSequenceSource, InputRecoverySource, CaptureFrameRateController {
     private let source: StreamingScreenCapture
     private let displayIndex: Int?
 
@@ -605,11 +755,31 @@ final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSo
         if let displayIndex {
             return try source.capture(displayIndex: displayIndex)
         }
+
         return try source.capture()
+    }
+
+    func currentSequence() throws -> UInt64? {
+        if let displayIndex {
+            return try source.currentSequence(displayIndex: displayIndex)
+        }
+        return try source.currentSequence()
     }
 
     func requestRecoveryAfterInput() {
         source.requestRecoveryAfterInput()
+    }
+
+    func registerCaptureRateConsumer(_ consumer: ObjectIdentifier, fps: Int) {
+        source.registerCaptureRateConsumer(consumer, fps: fps)
+    }
+
+    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier) {
+        source.updateCaptureRate(fps, consumer: consumer)
+    }
+
+    func unregisterCaptureRateConsumer(_ consumer: ObjectIdentifier) {
+        source.unregisterCaptureRateConsumer(consumer)
     }
 }
 

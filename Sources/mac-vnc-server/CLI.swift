@@ -28,7 +28,8 @@ enum CLICommand {
     func run() async throws {
         switch self {
         case .run(let config):
-            try await runServers(config: config)
+            let resolvedConfig = try resolvePassword(in: config)
+            try await runServers(config: resolvedConfig)
         case .permissions:
             Permissions.printAndRequest()
         case .diagnose:
@@ -41,6 +42,16 @@ enum CLICommand {
         case .version:
             print("mac-vnc-server \(AppVersion.current)")
         }
+    }
+
+    private func resolvePassword(in config: ServerConfig) throws -> ServerConfig {
+        guard config.passwordFromConfig else {
+            return config
+        }
+
+        let password = try PasswordStore.loadOrCreate()
+        print("VNC password: \(password)")
+        return config.withResolvedPassword(password)
     }
 
     private func runServers(config: ServerConfig) async throws {
@@ -163,7 +174,8 @@ enum CLI {
     private static func parseRun(_ arguments: [String]) throws -> ServerConfig {
         var port: UInt16 = 5900
         var bindAddress = "127.0.0.1"
-        var password: String? = "macvnc"
+        var password: String?
+        var passwordFromConfig = true
         var insecureAllowNoAuth = false
         var fps = 60
         var scale: Double = 1
@@ -196,8 +208,10 @@ enum CLI {
                     throw CLIError.invalidArgument("--password requires a value")
                 }
                 password = arguments[index]
+                passwordFromConfig = false
             case "--no-password":
                 password = nil
+                passwordFromConfig = false
             case "--insecure-allow-no-auth":
                 insecureAllowNoAuth = true
             case "--fps":
@@ -253,7 +267,7 @@ enum CLI {
             index += 1
         }
 
-        if !isLoopback(bindAddress), password == nil, !insecureAllowNoAuth {
+        if !isLoopback(bindAddress), !passwordFromConfig, password == nil, !insecureAllowNoAuth {
             throw CLIError.invalidArgument("""
             refusing to expose unauthenticated VNC on \(bindAddress)
             Use --password for LAN, or pass --insecure-allow-no-auth if you explicitly want no auth.
@@ -264,6 +278,7 @@ enum CLI {
             bindAddress: bindAddress,
             port: port,
             password: password,
+            passwordFromConfig: passwordFromConfig,
             fps: fps,
             scale: scale,
             encodingPreference: encodingPreference,
@@ -301,7 +316,7 @@ enum CLI {
       mac-vnc-server update
       mac-vnc-server version
 
-    Default bind address is 127.0.0.1, default port is 5900, and default password is macvnc.
+    Default bind address is 127.0.0.1 and default port is 5900. The first run generates an 8-character password in ~/.mac-vnc-server/config.json and prints it to stdout.
     Without --display, port 5900 serves all displays and 5901, 5902, ... serve each display.
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
@@ -337,6 +352,24 @@ private extension ServerConfig {
             bindAddress: bindAddress,
             port: port ?? self.port,
             password: password,
+            passwordFromConfig: passwordFromConfig,
+            fps: fps,
+            scale: scale,
+            encodingPreference: encodingPreference,
+            displaySelection: displaySelection,
+            verbose: verbose,
+            clipboardSync: clipboardSync,
+            adaptiveStreaming: adaptiveStreaming,
+            adaptiveFrameRate: adaptiveFrameRate
+        )
+    }
+
+    func withResolvedPassword(_ password: String) -> ServerConfig {
+        ServerConfig(
+            bindAddress: bindAddress,
+            port: port,
+            password: password,
+            passwordFromConfig: false,
             fps: fps,
             scale: scale,
             encodingPreference: encodingPreference,

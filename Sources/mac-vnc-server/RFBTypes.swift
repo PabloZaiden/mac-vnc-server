@@ -204,8 +204,18 @@ protocol FramebufferSource {
     func capture() throws -> Framebuffer
 }
 
+protocol FramebufferSequenceSource {
+    func currentSequence() throws -> UInt64?
+}
+
 protocol InputRecoverySource {
     func requestRecoveryAfterInput()
+}
+
+protocol CaptureFrameRateController {
+    func registerCaptureRateConsumer(_ consumer: ObjectIdentifier, fps: Int)
+    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier)
+    func unregisterCaptureRateConsumer(_ consumer: ObjectIdentifier)
 }
 
 protocol InputController {

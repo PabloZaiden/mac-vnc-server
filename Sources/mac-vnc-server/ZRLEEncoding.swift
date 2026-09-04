@@ -2,6 +2,62 @@ import Foundation
 import zlib
 
 final class ZRLEEncoder {
+    final class Transaction {
+        private var stream = z_stream()
+        private var initialized = false
+        private var pendingOutput: [UInt8]
+        private let compressionLevel: Int32
+
+        fileprivate init(parent: ZRLEEncoder) throws {
+            pendingOutput = parent.pendingOutput
+            compressionLevel = parent.compressionLevel
+
+            let status = zlib.deflateCopy(&stream, &parent.stream)
+            guard status == Z_OK else {
+                throw RFBError.protocolError("ZRLE deflateCopy failed with status \(status)")
+            }
+            initialized = true
+        }
+
+        deinit {
+            if initialized {
+                zlib.deflateEnd(&stream)
+            }
+        }
+
+        func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
+            guard pixelFormat.trueColor, pixelFormat.bitsPerPixel == 32 else {
+                throw RFBError.unsupportedPixelFormat(pixelFormat)
+            }
+
+            let uncompressed = ZRLEEncoder.tileBytes(
+                rect: rect,
+                framebuffer: framebuffer,
+                pixelFormat: pixelFormat
+            )
+            let compressed = try ZRLEEncoder.deflate(
+                uncompressed,
+                stream: &stream,
+                pendingOutput: &pendingOutput
+            )
+            return UInt32(compressed.count).beBytes + compressed
+        }
+
+        fileprivate func copyState(
+            to destination: UnsafeMutablePointer<z_stream>
+        ) throws -> (pendingOutput: [UInt8], compressionLevel: Int32) {
+            stream.next_in = nil
+            stream.avail_in = 0
+            stream.next_out = nil
+            stream.avail_out = 0
+            let status = zlib.deflateCopy(destination, &stream)
+            guard status == Z_OK else {
+                throw RFBError.protocolError("ZRLE deflateCopy failed with status \(status)")
+            }
+            return (pendingOutput, compressionLevel)
+        }
+    }
+
     private var stream = z_stream()
     private var initialized = false
     private var compressionLevel = Int32(Z_BEST_SPEED)
@@ -52,7 +108,32 @@ final class ZRLEEncoder {
             }
         } while stream.avail_out == 0
 
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
         compressionLevel = level
+    }
+
+    func beginTransaction() throws -> Transaction {
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
+        return try Transaction(parent: self)
+    }
+
+    func commit(_ transaction: Transaction) throws {
+        var oldStream = stream
+        deflateEnd(&oldStream)
+        stream = z_stream()
+        initialized = false
+        let metadata = try withUnsafeMutablePointer(to: &stream) { destination in
+            try transaction.copyState(to: destination)
+        }
+        pendingOutput = metadata.pendingOutput
+        compressionLevel = metadata.compressionLevel
+        initialized = true
     }
 
     func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
@@ -61,11 +142,15 @@ final class ZRLEEncoder {
         }
 
         let uncompressed = Self.tileBytes(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat)
-        let compressed = try deflate(uncompressed)
+        let compressed = try Self.deflate(uncompressed, stream: &stream, pendingOutput: &pendingOutput)
         return UInt32(compressed.count).beBytes + compressed
     }
 
-    private func deflate(_ bytes: [UInt8]) throws -> [UInt8] {
+    private static func deflate(
+        _ bytes: [UInt8],
+        stream: inout z_stream,
+        pendingOutput: inout [UInt8]
+    ) throws -> [UInt8] {
         var output = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
         output.reserveCapacity(max(1024, bytes.count / 3))
@@ -96,11 +181,15 @@ final class ZRLEEncoder {
                 }
             } while stream.avail_out == 0
         }
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
 
         return output
     }
 
-    private static func tileBytes(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) -> [UInt8] {
+    fileprivate static func tileBytes(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) -> [UInt8] {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(rect.width * rect.height * pixelFormat.cPixelByteCount)
 
