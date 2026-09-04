@@ -2,6 +2,54 @@ import Foundation
 import zlib
 
 final class ZlibEncoder {
+    final class Transaction {
+        private var stream = z_stream()
+        private var initialized = false
+        private var pendingOutput: [UInt8]
+        private let compressionLevel: Int32
+
+        fileprivate init(parent: ZlibEncoder) throws {
+            pendingOutput = parent.pendingOutput
+            compressionLevel = parent.compressionLevel
+
+            let status = zlib.deflateCopy(&stream, &parent.stream)
+            guard status == Z_OK else {
+                throw RFBError.protocolError("zlib deflateCopy failed with status \(status)")
+            }
+            initialized = true
+        }
+
+        deinit {
+            if initialized {
+                zlib.deflateEnd(&stream)
+            }
+        }
+
+        func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
+            let raw = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat)
+            let compressed = try ZlibEncoder.deflate(
+                raw,
+                stream: &stream,
+                pendingOutput: &pendingOutput
+            )
+            return UInt32(compressed.count).beBytes + compressed
+        }
+
+        fileprivate func copyState(
+            to destination: UnsafeMutablePointer<z_stream>
+        ) throws -> (pendingOutput: [UInt8], compressionLevel: Int32) {
+            stream.next_in = nil
+            stream.avail_in = 0
+            stream.next_out = nil
+            stream.avail_out = 0
+            let status = zlib.deflateCopy(destination, &stream)
+            guard status == Z_OK else {
+                throw RFBError.protocolError("zlib deflateCopy failed with status \(status)")
+            }
+            return (pendingOutput, compressionLevel)
+        }
+    }
+
     private var stream = z_stream()
     private var initialized = false
     private var compressionLevel = Int32(Z_BEST_SPEED)
@@ -52,16 +100,45 @@ final class ZlibEncoder {
             }
         } while stream.avail_out == 0
 
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
         compressionLevel = level
+    }
+
+    func beginTransaction() throws -> Transaction {
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
+        return try Transaction(parent: self)
+    }
+
+    func commit(_ transaction: Transaction) throws {
+        var oldStream = stream
+        zlib.deflateEnd(&oldStream)
+        stream = z_stream()
+        initialized = false
+        let metadata = try withUnsafeMutablePointer(to: &stream) { destination in
+            try transaction.copyState(to: destination)
+        }
+        pendingOutput = metadata.pendingOutput
+        compressionLevel = metadata.compressionLevel
+        initialized = true
     }
 
     func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
         let raw = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat)
-        let compressed = try deflate(raw)
+        let compressed = try Self.deflate(raw, stream: &stream, pendingOutput: &pendingOutput)
         return UInt32(compressed.count).beBytes + compressed
     }
 
-    private func deflate(_ bytes: [UInt8]) throws -> [UInt8] {
+    private static func deflate(
+        _ bytes: [UInt8],
+        stream: inout z_stream,
+        pendingOutput: inout [UInt8]
+    ) throws -> [UInt8] {
         var output = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
         output.reserveCapacity(max(1024, bytes.count / 3))
@@ -92,6 +169,10 @@ final class ZlibEncoder {
                 }
             } while stream.avail_out == 0
         }
+        stream.next_in = nil
+        stream.avail_in = 0
+        stream.next_out = nil
+        stream.avail_out = 0
 
         return output
     }
