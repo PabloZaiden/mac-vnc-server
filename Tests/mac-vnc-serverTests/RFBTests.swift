@@ -70,7 +70,7 @@ import zlib
         return
     }
 
-    #expect(config.fps == 30)
+    #expect(config.fps == 60)
     #expect(config.adaptiveFrameRate)
 }
 
@@ -171,16 +171,22 @@ import zlib
         return
     }
 
-    #expect(config.fps == 30)
+    #expect(config.fps == 60)
     #expect(config.adaptiveFrameRate)
 }
 
-@Test func adaptiveFrameRateStartsAt30AndRecoversWithHysteresis() {
-    var controller = AdaptiveFrameRateController(startingFrameRate: 30)
-    #expect(controller.frameRate == 30)
+@Test func adaptiveFrameRateUses60To45To30WithHysteresis() {
+    var controller = AdaptiveFrameRateController(startingFrameRate: 60)
+    #expect(controller.frameRate == 60)
 
-    for _ in 0..<6 {
-        #expect(controller.update(frameDuration: 0.040) == nil)
+    for _ in 0..<5 {
+        #expect(controller.update(frameDuration: 0.020) == nil)
+    }
+    #expect(controller.update(frameDuration: 0.020) == 45)
+    #expect(controller.frameRate == 45)
+
+    for index in 0..<6 {
+        #expect(controller.update(frameDuration: 0.030) == (index == 5 ? 30 : nil))
     }
     #expect(controller.frameRate == 30)
 
@@ -188,13 +194,8 @@ import zlib
         #expect(controller.update(frameDuration: 0.010) == nil)
     }
     #expect(controller.update(frameDuration: 0.010) == 45)
+    #expect(controller.update(frameDuration: 0.010) == nil)
     #expect(controller.frameRate == 45)
-
-    for _ in 0..<299 {
-        #expect(controller.update(frameDuration: 0.010) == nil)
-    }
-    #expect(controller.update(frameDuration: 0.010) == 60)
-    #expect(controller.frameRate == 60)
 }
 
 @Test func adaptiveScaleDropsOnlyAfterSustainedOverloadAndRecovers() {

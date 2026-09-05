@@ -122,7 +122,7 @@ final class RFBServer {
         let listener = try ListeningSocket(bindAddress: config.bindAddress, port: config.port)
         logger.info("mac-vnc-server \(AppVersion.current)")
         logger.info("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
-        let fpsDescription = config.adaptiveFrameRate ? "auto(30-45-60)" : "\(config.fps)"
+        let fpsDescription = config.adaptiveFrameRate ? "auto(60-45-30)" : "\(config.fps)"
         logger.info("fps=\(fpsDescription) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
         logger.info("password configured: \(config.password != nil)")
         logger.info("clipboard sync: \(config.clipboardSync ? "enabled" : "disabled")")
