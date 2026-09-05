@@ -112,12 +112,17 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
         desiredCaptureFPS = target
         captureRateLock.unlock()
 
+        updateFrameAcceptanceRate(target)
         if shouldSchedule {
             scheduleCaptureRateUpdate()
         }
     }
 
-    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier) {
+    func updateCaptureRate(
+        _ fps: Int,
+        consumer: ObjectIdentifier,
+        reconfigureCapture: Bool
+    ) {
         captureRateLock.lock()
         captureRateRequests[consumer] = fps
         let target = effectiveCaptureFPSLocked()
@@ -125,7 +130,8 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
         desiredCaptureFPS = target
         captureRateLock.unlock()
 
-        if shouldSchedule {
+        updateFrameAcceptanceRate(target)
+        if shouldSchedule, reconfigureCapture {
             scheduleCaptureRateUpdate()
         }
     }
@@ -138,9 +144,14 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
         desiredCaptureFPS = target
         captureRateLock.unlock()
 
+        updateFrameAcceptanceRate(target)
         if shouldSchedule {
             scheduleCaptureRateUpdate()
         }
+    }
+
+    private func updateFrameAcceptanceRate(_ fps: Int) {
+        currentStore().setAcceptedFrameRate(fps)
     }
 
     private func scheduleDisplayWakeup() {
@@ -264,7 +275,11 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
         }
 
         let layout = VirtualDisplayLayout(displays: displays, scaleOverride: scale)
-        let store = StreamingFrameStore(layout: layout, expectedDisplayIDs: Set(displays.map(\.id)))
+        let store = StreamingFrameStore(
+            layout: layout,
+            expectedDisplayIDs: Set(displays.map(\.id)),
+            acceptedFrameRate: fps
+        )
         var streams: [SCStream] = []
         var configurations: [SCStreamConfiguration] = []
         var outputs: [ScreenCaptureStreamOutput] = []
@@ -396,6 +411,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
     }
 
     private func install(_ started: StartedCapture) {
+        started.store.setAcceptedFrameRate(captureRateTarget())
         stateLock.lock()
         store = started.store
         streams = started.streams
@@ -523,18 +539,59 @@ private final class StreamingFrameStore: @unchecked Sendable {
     private let expectedDisplayIDs: Set<CGDirectDisplayID>
     private var frames: [CGDirectDisplayID: DisplayFrame] = [:]
     private var displaySequences: [CGDirectDisplayID: UInt64] = [:]
+    private var acceptedFrameInterval: TimeInterval
+    private var lastAcceptedPresentationTimes: [CGDirectDisplayID: TimeInterval] = [:]
+    private var droppedFramePending: [CGDirectDisplayID: Bool] = [:]
     private var sequence: UInt64 = 0
 
-    init(layout: VirtualDisplayLayout, expectedDisplayIDs: Set<CGDirectDisplayID>) {
+    init(
+        layout: VirtualDisplayLayout,
+        expectedDisplayIDs: Set<CGDirectDisplayID>,
+        acceptedFrameRate: Int
+    ) {
         self.layout = layout
         self.expectedDisplayIDs = expectedDisplayIDs
+        acceptedFrameInterval = 1.0 / Double(max(1, acceptedFrameRate))
     }
 
-    func update(displayID: CGDirectDisplayID, pixelBuffer: CVPixelBuffer, dirtyRects: [Rect]?) {
+    func setAcceptedFrameRate(_ fps: Int) {
+        condition.lock()
+        acceptedFrameInterval = 1.0 / Double(max(1, fps))
+        condition.unlock()
+    }
+
+    func update(
+        displayID: CGDirectDisplayID,
+        pixelBuffer: CVPixelBuffer,
+        dirtyRects: [Rect]?,
+        presentationTime: TimeInterval?
+    ) {
+        let acceptedDirtyRects: [Rect]?
+        condition.lock()
+        if let presentationTime,
+           let lastPresentationTime = lastAcceptedPresentationTimes[displayID] {
+            let elapsed = presentationTime - lastPresentationTime
+            if elapsed >= 0, elapsed + 0.0005 < acceptedFrameInterval {
+                droppedFramePending[displayID] = true
+                condition.unlock()
+                return
+            }
+        }
+        if let presentationTime {
+            lastAcceptedPresentationTimes[displayID] = presentationTime
+        }
+        acceptedDirtyRects = droppedFramePending.removeValue(forKey: displayID) == true
+            ? nil
+            : dirtyRects
+        condition.unlock()
+
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
         guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            condition.lock()
+            droppedFramePending[displayID] = true
+            condition.unlock()
             return
         }
 
@@ -557,7 +614,7 @@ private final class StreamingFrameStore: @unchecked Sendable {
             height: height,
             bytesPerRow: bytesPerRow,
             bgra: bytes,
-            dirtyRects: dirtyRects
+            dirtyRects: acceptedDirtyRects
         )
         condition.broadcast()
         condition.unlock()
@@ -774,8 +831,16 @@ final class SelectedDisplayFramebufferSource: @unchecked Sendable, FramebufferSo
         source.registerCaptureRateConsumer(consumer, fps: fps)
     }
 
-    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier) {
-        source.updateCaptureRate(fps, consumer: consumer)
+    func updateCaptureRate(
+        _ fps: Int,
+        consumer: ObjectIdentifier,
+        reconfigureCapture: Bool
+    ) {
+        source.updateCaptureRate(
+            fps,
+            consumer: consumer,
+            reconfigureCapture: reconfigureCapture
+        )
     }
 
     func unregisterCaptureRateConsumer(_ consumer: ObjectIdentifier) {
@@ -801,7 +866,16 @@ private final class ScreenCaptureStreamOutput: NSObject, SCStreamOutput {
             width: CVPixelBufferGetWidth(pixelBuffer),
             height: CVPixelBufferGetHeight(pixelBuffer)
         )
-        store.update(displayID: displayID, pixelBuffer: pixelBuffer, dirtyRects: dirtyRects)
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let presentationSeconds = presentationTime.isValid
+            ? CMTimeGetSeconds(presentationTime)
+            : nil
+        store.update(
+            displayID: displayID,
+            pixelBuffer: pixelBuffer,
+            dirtyRects: dirtyRects,
+            presentationTime: presentationSeconds?.isFinite == true ? presentationSeconds : nil
+        )
     }
 
     private static func dirtyRects(

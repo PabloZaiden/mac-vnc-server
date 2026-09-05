@@ -1,6 +1,36 @@
 import Foundation
 
 enum RawEncoding {
+    static func recommendedTileSize(requested: Rect, dirtyRects: [Rect]?) -> Int {
+        guard let dirtyRects, !dirtyRects.isEmpty else {
+            return 64
+        }
+
+        let requestedArea = max(0, requested.width) * max(0, requested.height)
+        guard requestedArea > 0 else {
+            return 64
+        }
+
+        var dirtyArea = 0
+        for dirtyRect in dirtyRects {
+            let x0 = max(requested.x, dirtyRect.x)
+            let y0 = max(requested.y, dirtyRect.y)
+            let x1 = min(requested.x + requested.width, dirtyRect.x + dirtyRect.width)
+            let y1 = min(requested.y + requested.height, dirtyRect.y + dirtyRect.height)
+            if x1 > x0, y1 > y0 {
+                dirtyArea += (x1 - x0) * (y1 - y0)
+            }
+        }
+
+        if dirtyArea * 64 <= requestedArea {
+            return 16
+        }
+        if dirtyArea * 16 <= requestedArea {
+            return 32
+        }
+        return 64
+    }
+
     static func rectangles(
         current: Framebuffer,
         previous: Framebuffer?,
@@ -65,6 +95,17 @@ enum RawEncoding {
     }
 
     static func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
+        var output: [UInt8] = []
+        try encode(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat, into: &output)
+        return output
+    }
+
+    static func encode(
+        rect: Rect,
+        framebuffer: Framebuffer,
+        pixelFormat: PixelFormat,
+        into output: inout [UInt8]
+    ) throws {
         guard pixelFormat.trueColor else {
             throw RFBError.unsupportedPixelFormat(pixelFormat)
         }
@@ -72,11 +113,12 @@ enum RawEncoding {
             throw RFBError.unsupportedPixelFormat(pixelFormat)
         }
 
+        output.removeAll(keepingCapacity: true)
         if pixelFormat == .serverDefault {
-            return encodeServerDefault(rect: rect, framebuffer: framebuffer)
+            encodeServerDefault(rect: rect, framebuffer: framebuffer, into: &output)
+            return
         }
 
-        var output: [UInt8] = []
         output.reserveCapacity(rect.width * rect.height * Int(pixelFormat.bitsPerPixel / 8))
 
         for row in rect.y..<(rect.y + rect.height) {
@@ -88,13 +130,15 @@ enum RawEncoding {
                 pixelFormat.appendPixelBytes(red: red, green: green, blue: blue, to: &output)
             }
         }
-
-        return output
     }
 
-    private static func encodeServerDefault(rect: Rect, framebuffer: Framebuffer) -> [UInt8] {
+    private static func encodeServerDefault(
+        rect: Rect,
+        framebuffer: Framebuffer,
+        into output: inout [UInt8]
+    ) {
         let rowByteCount = rect.width * 4
-        var output = [UInt8](repeating: 0, count: rowByteCount * rect.height)
+        output.append(contentsOf: repeatElement(0, count: rowByteCount * rect.height))
 
         output.withUnsafeMutableBytes { destination in
             framebuffer.bgra.withUnsafeBytes { source in
@@ -114,7 +158,6 @@ enum RawEncoding {
             }
         }
 
-        return output
     }
 
     private static func hasChanges(rect: Rect, current: Framebuffer, previous: Framebuffer) -> Bool {

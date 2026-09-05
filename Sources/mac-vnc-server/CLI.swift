@@ -177,7 +177,7 @@ enum CLI {
         var password: String?
         var passwordFromConfig = true
         var insecureAllowNoAuth = false
-        var fps = 60
+        var fps = 30
         var scale: Double = 1
         var encodingPreference = EncodingPreference.auto
         var displaySelection = DisplaySelection.automatic
@@ -220,7 +220,7 @@ enum CLI {
                     throw CLIError.invalidArgument("--fps requires auto or a value between 1 and 120")
                 }
                 if arguments[index] == "auto" {
-                    fps = 60
+                    fps = 30
                     adaptiveFrameRate = true
                 } else if let parsed = Int(arguments[index]), (1...120).contains(parsed) {
                     fps = parsed
@@ -321,7 +321,7 @@ enum CLI {
     Use --display all to keep only the single combined-display server, or --display 1 for one display.
     Use --verbose to enable periodic framebuffer update logs.
     Use --clipboard-sync to enable basic text clipboard synchronization.
-    Use --no-adaptive to disable adaptive FPS and compression.
+    Use --no-adaptive to disable adaptive FPS, compression, and scale changes.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
