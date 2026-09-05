@@ -23,6 +23,30 @@ import zlib
     #expect(config.verbose)
 }
 
+@Test func clientCapabilitiesIdentifyStandardAndAppleFeatures() {
+    let capabilities = RFBClientCapabilities(encodings: [
+        RFBEncoding.raw.rawValue,
+        RFBStandardEncoding.copyRect,
+        RFBStandardEncoding.tight,
+        RFBEncoding.zlib.rawValue,
+        RFBEncoding.zrle.rawValue,
+        RFBPseudoEncoding.richCursor,
+        RFBPseudoEncoding.extendedDesktopSize,
+        1011
+    ])
+
+    #expect(capabilities.supportsRaw)
+    #expect(capabilities.supportsCopyRect)
+    #expect(capabilities.supportsTight)
+    #expect(capabilities.supportsZlib)
+    #expect(capabilities.supportsZRLE)
+    #expect(capabilities.supportsRichCursor)
+    #expect(capabilities.supportsExtendedDesktopSize)
+    #expect(capabilities.isAppleScreenSharingClient)
+    #expect(capabilities.summary.contains("copyrect"))
+    #expect(capabilities.summary.contains("apple=true"))
+}
+
 @Test func cliDisablesClipboardSyncByDefault() throws {
     guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
         Issue.record("expected run command")
