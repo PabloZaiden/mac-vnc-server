@@ -7,7 +7,7 @@ The default setup is optimized for local testing with Apple Screen Sharing:
 - bind address: `127.0.0.1`
 - base port: `5900`
 - password: generated and stored in `~/.mac-vnc-server/config.json`
-- FPS target: adaptive starts at `30` and can recover to `45 -> 60`
+- FPS target: adaptive `60 -> 45 -> 30`
 - scale: `1.0`
 - encoding: `auto`
 
@@ -196,7 +196,7 @@ Options:
 | `--password <value>` | config file | Override the generated/configured classic VNC auth password for this run. |
 | `--no-password` | off | Use unauthenticated VNC. Apple Screen Sharing does not accept this path. |
 | `--insecure-allow-no-auth` | off | Required with `--no-password` on non-loopback binds. |
-| `--fps <auto\|1...120>` | `auto` | Adaptive target starts at `30` FPS and can recover to `45` or `60`; an explicit number selects a fixed framebuffer update rate. |
+| `--fps <auto\|1...120>` | `auto` | Adaptive `60 -> 45 -> 30` target, or a fixed framebuffer update rate when an explicit number is provided. |
 | `--scale <value>` | `1.0` | Base virtual framebuffer scale. Adaptive sessions may temporarily use `0.75` or `0.67` for compatible generic clients that advertise DesktopSize when encoding or network pressure persists. Apple Screen Sharing remains at the negotiated framebuffer size until its resize dialect is implemented. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
@@ -266,7 +266,7 @@ Screen capture uses `ScreenCaptureKit` with one stream per selected display. Cap
 
 If macOS sleeps the screens while the server is running, the capture streams are rebuilt after `screensDidWakeNotification`, when an active `SCStream` reports `didStopWithError`, or when input arrives after a failed recovery. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session, so input handling remains connected.
 
-When a client or network cannot consume updates quickly enough, the server keeps only the newest captured frame and drops stale frames before sending their RFB update header. Persistent Zlib/ZRLE state is transactional, so a dropped frame cannot desynchronize the stream. Client sockets use non-blocking writes with a five-second no-progress timeout; a connection that makes no write progress is closed instead of blocking the capture pipeline indefinitely. Adaptive sessions start at 30 FPS and can recover to 45 or 60 FPS when sustained headroom is available; shared capture streams use the highest rate requested by their active clients.
+When a client or network cannot consume updates quickly enough, the server keeps only the newest captured frame and drops stale frames before sending their RFB update header. Persistent Zlib/ZRLE state is transactional, so a dropped frame cannot desynchronize the stream. Client sockets use non-blocking writes with a five-second no-progress timeout; a connection that makes no write progress is closed instead of blocking the capture pipeline indefinitely. Adaptive sessions lower the output target from 60 to 45 to 30 FPS under sustained pressure and recover after sustained headroom; shared capture streams use the highest rate requested by their active clients.
 
 Clients that advertise the standard `DesktopSize` pseudo-encoding can also enter a per-client scale ladder of `1.0 -> 0.75 -> 0.67` after sustained encoding or network pressure. Frames are resampled with Apple's Accelerate framework using high-quality filtering so the server reduces work and bandwidth only when needed. The session recovers one scale step after five healthy seconds. Clients without standard resize support remain at the configured scale and use FPS/backpressure adaptation instead.
 

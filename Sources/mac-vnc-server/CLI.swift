@@ -177,7 +177,7 @@ enum CLI {
         var password: String?
         var passwordFromConfig = true
         var insecureAllowNoAuth = false
-        var fps = 30
+        var fps = 60
         var scale: Double = 1
         var encodingPreference = EncodingPreference.auto
         var displaySelection = DisplaySelection.automatic
@@ -220,7 +220,7 @@ enum CLI {
                     throw CLIError.invalidArgument("--fps requires auto or a value between 1 and 120")
                 }
                 if arguments[index] == "auto" {
-                    fps = 30
+                    fps = 60
                     adaptiveFrameRate = true
                 } else if let parsed = Int(arguments[index]), (1...120).contains(parsed) {
                     fps = parsed
