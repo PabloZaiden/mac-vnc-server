@@ -3,12 +3,14 @@ import zlib
 
 final class ZlibEncoder {
     final class Transaction {
+        private unowned let parent: ZlibEncoder
         private var stream = z_stream()
         private var initialized = false
         private var pendingOutput: [UInt8]
         private let compressionLevel: Int32
 
         fileprivate init(parent: ZlibEncoder) throws {
+            self.parent = parent
             pendingOutput = parent.pendingOutput
             compressionLevel = parent.compressionLevel
 
@@ -26,11 +28,17 @@ final class ZlibEncoder {
         }
 
         func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
-            let raw = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat)
+            try RawEncoding.encode(
+                rect: rect,
+                framebuffer: framebuffer,
+                pixelFormat: pixelFormat,
+                into: &parent.rawBuffer
+            )
             let compressed = try ZlibEncoder.deflate(
-                raw,
+                &parent.rawBuffer,
                 stream: &stream,
-                pendingOutput: &pendingOutput
+                pendingOutput: &pendingOutput,
+                outputChunk: &parent.outputChunk
             )
             return UInt32(compressed.count).beBytes + compressed
         }
@@ -54,6 +62,8 @@ final class ZlibEncoder {
     private var initialized = false
     private var compressionLevel = Int32(Z_BEST_SPEED)
     private var pendingOutput: [UInt8] = []
+    fileprivate var rawBuffer: [UInt8] = []
+    fileprivate var outputChunk = [UInt8](repeating: 0, count: 16 * 1024)
 
     init() throws {
         let status = deflateInit_(&stream, Z_BEST_SPEED, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
@@ -129,31 +139,40 @@ final class ZlibEncoder {
     }
 
     func encode(rect: Rect, framebuffer: Framebuffer, pixelFormat: PixelFormat) throws -> [UInt8] {
-        let raw = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: pixelFormat)
-        let compressed = try Self.deflate(raw, stream: &stream, pendingOutput: &pendingOutput)
+        try RawEncoding.encode(
+            rect: rect,
+            framebuffer: framebuffer,
+            pixelFormat: pixelFormat,
+            into: &rawBuffer
+        )
+        let compressed = try Self.deflate(
+            &rawBuffer,
+            stream: &stream,
+            pendingOutput: &pendingOutput,
+            outputChunk: &outputChunk
+        )
         return UInt32(compressed.count).beBytes + compressed
     }
 
     private static func deflate(
-        _ bytes: [UInt8],
+        _ bytes: inout [UInt8],
         stream: inout z_stream,
-        pendingOutput: inout [UInt8]
+        pendingOutput: inout [UInt8],
+        outputChunk: inout [UInt8]
     ) throws -> [UInt8] {
         var output = pendingOutput
         pendingOutput.removeAll(keepingCapacity: true)
         output.reserveCapacity(max(1024, bytes.count / 3))
 
-        var input = bytes
-        let inputCount = input.count
-        var chunk = [UInt8](repeating: 0, count: 16 * 1024)
-        try input.withUnsafeMutableBytes { inputPointer in
+        let inputCount = bytes.count
+        try bytes.withUnsafeMutableBytes { inputPointer in
             stream.next_in = inputPointer.bindMemory(to: Bytef.self).baseAddress
             stream.avail_in = uInt(inputCount)
 
             repeat {
-                let chunkCount = chunk.count
+                let chunkCount = outputChunk.count
                 let before = stream.total_out
-                let status = chunk.withUnsafeMutableBytes { outputPointer in
+                let status = outputChunk.withUnsafeMutableBytes { outputPointer in
                     stream.next_out = outputPointer.bindMemory(to: Bytef.self).baseAddress
                     stream.avail_out = uInt(chunkCount)
                     return zlib.deflate(&stream, Z_SYNC_FLUSH)
@@ -165,7 +184,7 @@ final class ZlibEncoder {
 
                 let produced = Int(stream.total_out - before)
                 if produced > 0 {
-                    output.append(contentsOf: chunk.prefix(produced))
+                    output.append(contentsOf: outputChunk.prefix(produced))
                 }
             } while stream.avail_out == 0
         }

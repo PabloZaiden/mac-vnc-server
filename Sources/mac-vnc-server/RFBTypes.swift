@@ -105,6 +105,10 @@ struct PixelFormat: Equatable {
 
     func appendCPixelBytes(red: UInt8, green: UInt8, blue: UInt8, to output: inout [UInt8]) {
         let pixel = packedPixel(red: red, green: green, blue: blue)
+        appendCPixelValue(pixel, to: &output)
+    }
+
+    func appendCPixelValue(_ pixel: UInt32, to output: inout [UInt8]) {
         let byteCount = Int(bitsPerPixel / 8)
 
         guard usesThreeByteCPixel else {
@@ -138,7 +142,7 @@ struct PixelFormat: Equatable {
             && blueShift < 24
     }
 
-    private func packedPixel(red: UInt8, green: UInt8, blue: UInt8) -> UInt32 {
+    func packedPixel(red: UInt8, green: UInt8, blue: UInt8) -> UInt32 {
         let redValue = scaled(UInt32(red), max: UInt32(redMax)) << UInt32(redShift)
         let greenValue = scaled(UInt32(green), max: UInt32(greenMax)) << UInt32(greenShift)
         let blueValue = scaled(UInt32(blue), max: UInt32(blueMax)) << UInt32(blueShift)
@@ -214,7 +218,11 @@ protocol InputRecoverySource {
 
 protocol CaptureFrameRateController {
     func registerCaptureRateConsumer(_ consumer: ObjectIdentifier, fps: Int)
-    func updateCaptureRate(_ fps: Int, consumer: ObjectIdentifier)
+    func updateCaptureRate(
+        _ fps: Int,
+        consumer: ObjectIdentifier,
+        reconfigureCapture: Bool
+    )
     func unregisterCaptureRateConsumer(_ consumer: ObjectIdentifier)
 }
 

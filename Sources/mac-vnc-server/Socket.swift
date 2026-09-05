@@ -89,6 +89,71 @@ final class ClientSocket {
         }
     }
 
+    func writeAll(
+        _ chunks: [[UInt8]],
+        idleTimeout: TimeInterval = ClientSocket.writeIdleTimeout,
+        onStall: (() -> Void)? = nil
+    ) throws {
+        guard chunks.count <= 1_024 else {
+            for chunk in chunks {
+                try writeAll(chunk, idleTimeout: idleTimeout, onStall: onStall)
+            }
+            return
+        }
+
+        let totalBytes = chunks.reduce(0) { $0 + $1.count }
+        guard totalBytes > 0 else {
+            return
+        }
+
+        var offsets = [Int](repeating: 0, count: chunks.count)
+        var writtenTotal = 0
+        var lastProgress = DispatchTime.now().uptimeNanoseconds
+
+        while writtenTotal < totalBytes {
+            let written = withIOVectors(chunks: chunks, offsets: offsets) { vectors in
+                vectors.withUnsafeBufferPointer { pointer in
+                    Darwin.writev(fd, pointer.baseAddress, Int32(pointer.count))
+                }
+            }
+            if written > 0 {
+                writtenTotal += written
+                var remaining = written
+                for index in offsets.indices {
+                    let available = chunks[index].count - offsets[index]
+                    let consumed = min(remaining, available)
+                    offsets[index] += consumed
+                    remaining -= consumed
+                    if remaining == 0 {
+                        break
+                    }
+                }
+                lastProgress = DispatchTime.now().uptimeNanoseconds
+                continue
+            }
+            if written == 0 {
+                try waitForWritable(
+                    since: lastProgress,
+                    idleTimeout: idleTimeout,
+                    onStall: onStall
+                )
+                continue
+            }
+            if errno == EINTR {
+                continue
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                try waitForWritable(
+                    since: lastProgress,
+                    idleTimeout: idleTimeout,
+                    onStall: onStall
+                )
+                continue
+            }
+            throw RFBError.socketError(String(cString: strerror(errno)))
+        }
+    }
+
     func writeString(_ string: String) throws {
         try writeAll(Array(string.utf8))
     }
@@ -102,6 +167,39 @@ final class ClientSocket {
         didShutdown = true
         stateLock.unlock()
         Darwin.shutdown(fd, SHUT_RDWR)
+    }
+
+    private func withIOVectors<T>(
+        chunks: [[UInt8]],
+        offsets: [Int],
+        _ body: ([iovec]) -> T
+    ) -> T {
+        func appendVectors(_ index: Int, _ vectors: [iovec]) -> T {
+            guard index < chunks.count else {
+                return body(vectors)
+            }
+
+            let offset = offsets[index]
+            guard offset < chunks[index].count else {
+                return appendVectors(index + 1, vectors)
+            }
+
+            return chunks[index].withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    return appendVectors(index + 1, vectors)
+                }
+                var nextVectors = vectors
+                nextVectors.append(
+                    iovec(
+                        iov_base: UnsafeMutableRawPointer(mutating: baseAddress).advanced(by: offset),
+                        iov_len: chunks[index].count - offset
+                    )
+                )
+                return appendVectors(index + 1, nextVectors)
+            }
+        }
+
+        return appendVectors(0, [])
     }
 
     private func waitForWritable(

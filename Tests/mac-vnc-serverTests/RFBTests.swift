@@ -23,6 +23,38 @@ import zlib
     #expect(config.verbose)
 }
 
+@Test func clientCapabilitiesIdentifyStandardAndAppleFeatures() {
+    let capabilities = RFBClientCapabilities(encodings: [
+        RFBEncoding.raw.rawValue,
+        RFBStandardEncoding.copyRect,
+        RFBStandardEncoding.tight,
+        RFBEncoding.zlib.rawValue,
+        RFBEncoding.zrle.rawValue,
+        RFBPseudoEncoding.richCursor,
+        RFBPseudoEncoding.desktopSize,
+        RFBPseudoEncoding.extendedDesktopSize,
+        1011
+    ])
+
+    #expect(capabilities.supportsRaw)
+    #expect(capabilities.supportsCopyRect)
+    #expect(capabilities.supportsTight)
+    #expect(capabilities.supportsZlib)
+    #expect(capabilities.supportsZRLE)
+    #expect(capabilities.supportsRichCursor)
+    #expect(capabilities.supportsExtendedDesktopSize)
+    #expect(capabilities.isAppleScreenSharingClient)
+    #expect(!capabilities.supportsDynamicResize)
+    #expect(capabilities.summary.contains("copyrect"))
+    #expect(capabilities.summary.contains("apple=true"))
+
+    let genericResizeCapabilities = RFBClientCapabilities(encodings: [
+        RFBEncoding.raw.rawValue,
+        RFBPseudoEncoding.desktopSize
+    ])
+    #expect(genericResizeCapabilities.supportsDynamicResize)
+}
+
 @Test func cliDisablesClipboardSyncByDefault() throws {
     guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
         Issue.record("expected run command")
@@ -38,7 +70,7 @@ import zlib
         return
     }
 
-    #expect(config.fps == 60)
+    #expect(config.fps == 30)
     #expect(config.adaptiveFrameRate)
 }
 
@@ -139,30 +171,102 @@ import zlib
         return
     }
 
-    #expect(config.fps == 60)
+    #expect(config.fps == 30)
     #expect(config.adaptiveFrameRate)
 }
 
-@Test func adaptiveFrameRateUses60To45To30WithHysteresis() {
-    var controller = AdaptiveFrameRateController()
+@Test func adaptiveFrameRateStartsAt30AndRecoversWithHysteresis() {
+    var controller = AdaptiveFrameRateController(startingFrameRate: 30)
+    #expect(controller.frameRate == 30)
 
-    for _ in 0..<5 {
-        #expect(controller.update(frameDuration: 0.020) == nil)
-    }
-    #expect(controller.update(frameDuration: 0.020) == 45)
-    #expect(controller.frameRate == 45)
-
-    for index in 0..<6 {
-        #expect(controller.update(frameDuration: 0.030) == (index == 5 ? 30 : nil))
+    for _ in 0..<6 {
+        #expect(controller.update(frameDuration: 0.040) == nil)
     }
     #expect(controller.frameRate == 30)
 
-    for _ in 0..<89 {
+    for _ in 0..<299 {
         #expect(controller.update(frameDuration: 0.010) == nil)
     }
     #expect(controller.update(frameDuration: 0.010) == 45)
-    #expect(controller.update(frameDuration: 0.010) == nil)
     #expect(controller.frameRate == 45)
+
+    for _ in 0..<299 {
+        #expect(controller.update(frameDuration: 0.010) == nil)
+    }
+    #expect(controller.update(frameDuration: 0.010) == 60)
+    #expect(controller.frameRate == 60)
+}
+
+@Test func adaptiveScaleDropsOnlyAfterSustainedOverloadAndRecovers() {
+    var controller = AdaptiveScaleController()
+    let frameInterval = 1.0 / 60.0
+    var firstScaleChange: Double?
+
+    for _ in 0..<40 {
+        if let scale = controller.update(
+            frameDuration: 0.020,
+            encodeDuration: 0.020,
+            writeDuration: 0,
+            frameInterval: frameInterval,
+            minimumFrameInterval: frameInterval,
+            staleRetries: 0,
+            hadNetworkStall: false
+        ) {
+            firstScaleChange = scale
+            break
+        }
+    }
+
+    #expect(firstScaleChange == 0.75)
+    #expect(controller.scale == 0.75)
+
+    var recovered = false
+    for _ in 0..<400 {
+        if let scale = controller.update(
+            frameDuration: 0.010,
+            encodeDuration: 0.004,
+            writeDuration: 0.002,
+            frameInterval: frameInterval,
+            minimumFrameInterval: frameInterval,
+            staleRetries: 0,
+            hadNetworkStall: false
+        ) {
+            recovered = scale == 1.0
+            if recovered {
+                break
+            }
+        }
+    }
+
+    #expect(recovered)
+    #expect(controller.scale == 1.0)
+}
+
+@Test func framebufferResamplingPreservesLayoutAndScalesDirtyRects() throws {
+    let layout = VirtualDisplayLayout(
+        displays: [],
+        origin: .zero,
+        scale: 1,
+        width: 4,
+        height: 4
+    )
+    let framebuffer = Framebuffer(
+        width: 4,
+        height: 4,
+        bgra: [UInt8](repeating: 0x80, count: 4 * 4 * 4),
+        layout: layout,
+        sequence: 7,
+        dirtyRects: [Rect(x: 1, y: 1, width: 2, height: 2)]
+    )
+
+    let scaled = try FramebufferResampling.scale(framebuffer, factor: 0.5)
+
+    #expect(scaled.width == 2)
+    #expect(scaled.height == 2)
+    #expect(scaled.bgra.count == 2 * 2 * 4)
+    #expect(scaled.sequence == 7)
+    #expect(scaled.layout.scale == 0.5)
+    #expect(scaled.dirtyRects == [Rect(x: 0, y: 0, width: 2, height: 2)])
 }
 
 @Test func cliParsesClipboardSyncFlag() throws {
@@ -323,6 +427,21 @@ import zlib
     )
 
     #expect(rects == [Rect(x: 3, y: 0, width: 1, height: 1)])
+}
+
+@Test func rawEncodingUsesSmallerTilesForSmallDirtyRegions() {
+    #expect(
+        RawEncoding.recommendedTileSize(
+            requested: Rect(x: 0, y: 0, width: 1920, height: 1080),
+            dirtyRects: [Rect(x: 10, y: 10, width: 8, height: 8)]
+        ) == 16
+    )
+    #expect(
+        RawEncoding.recommendedTileSize(
+            requested: Rect(x: 0, y: 0, width: 1920, height: 1080),
+            dirtyRects: [Rect(x: 0, y: 0, width: 640, height: 480)]
+        ) == 64
+    )
 }
 
 @Test func zlibEncodingRoundTripsRawPayload() throws {
@@ -549,6 +668,88 @@ import zlib
 
     #expect(status == Z_OK)
     #expect(decompressed == [0, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04])
+}
+
+@Test func zrleUsesSolidAndPackedPaletteTiles() throws {
+    let layout = VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 8, height: 2)
+    let framebuffer = Framebuffer(
+        width: 8,
+        height: 2,
+        bgra: Array(repeating: [0x03, 0x02, 0x01, 0xff], count: 16).flatMap { $0 },
+        layout: layout
+    )
+    let encoder = try ZRLEEncoder()
+    let solidPayload = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 8, height: 2),
+        framebuffer: framebuffer,
+        pixelFormat: .serverDefault
+    )
+    let alternatingPixels: [UInt8] = (0..<8).flatMap { index in
+        index.isMultiple(of: 2)
+            ? [0x03, 0x02, 0x01, 0xff]
+            : [0x06, 0x05, 0x04, 0xff]
+    }
+    let alternating = Framebuffer(
+        width: 8,
+        height: 1,
+        bgra: alternatingPixels,
+        layout: VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 8, height: 1)
+    )
+    let packedPayload = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 8, height: 1),
+        framebuffer: alternating,
+        pixelFormat: .serverDefault
+    )
+    #expect(try inflatePayloads([solidPayload, packedPayload], outputCounts: [16, 16]) == [
+        1, 0x03, 0x02, 0x01,
+        2, 0x03, 0x02, 0x01, 0x06, 0x05, 0x04, 0x55
+    ])
+}
+
+@Test func zrleUsesRunLengthTilesWhenTheyWin() throws {
+    let runLengths = [10, 10, 10, 10, 8, 8, 8]
+    let runColors = [0, 1, 2, 3, 0, 1, 2]
+    var pixels: [UInt8] = []
+    for (length, color) in zip(runLengths, runColors) {
+        pixels += Array(
+            repeating: [UInt8(color * 3), UInt8(color * 5), UInt8(color * 7), 0xff],
+            count: length
+        ).flatMap { $0 }
+    }
+    let framebuffer = Framebuffer(
+        width: 64,
+        height: 1,
+        bgra: pixels,
+        layout: VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 64, height: 1)
+    )
+    let encoder = try ZRLEEncoder()
+    let paletteRLEPayload = try encoder.encode(
+        rect: Rect(x: 0, y: 0, width: 64, height: 1),
+        framebuffer: framebuffer,
+        pixelFormat: .serverDefault
+    )
+    let paletteRLEBytes = try inflatePayloads([paletteRLEPayload], outputCounts: [64])
+    #expect(paletteRLEBytes.first == 132)
+
+    let distinctColors = (0..<17).flatMap { index -> [UInt8] in
+        let color = UInt8(index)
+        return [color, color &* 3, color &* 5, 0xff]
+    }
+    let manyColors = distinctColors + Array(repeating: [0, 0, 0, 0xff], count: 47).flatMap { $0 }
+    let manyColorFramebuffer = Framebuffer(
+        width: 64,
+        height: 1,
+        bgra: manyColors,
+        layout: VirtualDisplayLayout(displays: [], origin: .zero, scale: 1, width: 64, height: 1)
+    )
+    let plainEncoder = try ZRLEEncoder()
+    let plainRLEPayload = try plainEncoder.encode(
+        rect: Rect(x: 0, y: 0, width: 64, height: 1),
+        framebuffer: manyColorFramebuffer,
+        pixelFormat: .serverDefault
+    )
+    let plainRLEBytes = try inflatePayloads([plainRLEPayload], outputCounts: [512])
+    #expect(plainRLEBytes.first == 128)
 }
 
 @Test func zrleEncodingHonorsClientRequestedColorShifts() throws {

@@ -34,6 +34,69 @@ enum RFBEncoding: Int32 {
     case zrle = 16
 }
 
+enum RFBStandardEncoding {
+    static let copyRect: Int32 = 1
+    static let tight: Int32 = 7
+}
+
+enum RFBPseudoEncoding {
+    static let xCursor: Int32 = -240
+    static let richCursor: Int32 = -239
+    static let desktopSize: Int32 = -223
+    static let extendedDesktopSize: Int32 = -308
+}
+
+struct RFBClientCapabilities: Equatable {
+    let advertisedEncodings: [Int32]
+    let supportsRaw: Bool
+    let supportsCopyRect: Bool
+    let supportsTight: Bool
+    let supportsZlib: Bool
+    let supportsZRLE: Bool
+    let supportsXCursor: Bool
+    let supportsRichCursor: Bool
+    let supportsDesktopSize: Bool
+    let supportsExtendedDesktopSize: Bool
+    let isAppleScreenSharingClient: Bool
+
+    init(encodings: [Int32]) {
+        advertisedEncodings = encodings
+        supportsRaw = encodings.contains(RFBEncoding.raw.rawValue)
+        supportsCopyRect = encodings.contains(RFBStandardEncoding.copyRect)
+        supportsTight = encodings.contains(RFBStandardEncoding.tight)
+        supportsZlib = encodings.contains(RFBEncoding.zlib.rawValue)
+        supportsZRLE = encodings.contains(RFBEncoding.zrle.rawValue)
+        supportsXCursor = encodings.contains(RFBPseudoEncoding.xCursor)
+        supportsRichCursor = encodings.contains(RFBPseudoEncoding.richCursor)
+        supportsDesktopSize = encodings.contains(RFBPseudoEncoding.desktopSize)
+        supportsExtendedDesktopSize = encodings.contains(RFBPseudoEncoding.extendedDesktopSize)
+        isAppleScreenSharingClient = encodings.contains(1011)
+            || encodings.contains(1002)
+            || encodings.contains(1100)
+            || encodings.contains(1104)
+    }
+
+    var summary: String {
+        let names = [
+            supportsRaw ? "raw" : nil,
+            supportsCopyRect ? "copyrect" : nil,
+            supportsTight ? "tight" : nil,
+            supportsZlib ? "zlib" : nil,
+            supportsZRLE ? "zrle" : nil,
+            supportsXCursor || supportsRichCursor ? "cursor" : nil,
+            supportsDesktopSize || supportsExtendedDesktopSize ? "resize" : nil
+        ].compactMap { $0 }
+
+        return "encodings=[\(advertisedEncodings.map(String.init).joined(separator: ","))] " +
+            "features=[\(names.joined(separator: ","))] " +
+            "apple=\(isAppleScreenSharingClient)"
+    }
+
+    var supportsDynamicResize: Bool {
+        supportsDesktopSize && !isAppleScreenSharingClient
+    }
+}
+
 final class RFBServer {
     private let config: ServerConfig
     private let capture: FramebufferSource
@@ -59,7 +122,7 @@ final class RFBServer {
         let listener = try ListeningSocket(bindAddress: config.bindAddress, port: config.port)
         logger.info("mac-vnc-server \(AppVersion.current)")
         logger.info("mac-vnc-server listening on \(config.bindAddress):\(config.port)")
-        let fpsDescription = config.adaptiveFrameRate ? "auto(60-45-30)" : "\(config.fps)"
+        let fpsDescription = config.adaptiveFrameRate ? "auto(30-45-60)" : "\(config.fps)"
         logger.info("fps=\(fpsDescription) scale=\(config.scale) encoding=\(config.encodingPreference.rawValue) display=\(config.displaySelection.description)")
         logger.info("password configured: \(config.password != nil)")
         logger.info("clipboard sync: \(config.clipboardSync ? "enabled" : "disabled")")
@@ -104,9 +167,13 @@ extension DisplaySelection {
 struct AdaptiveFrameRateController {
     static let frameRates = [60, 45, 30]
 
-    private(set) var index = 0
+    private(set) var index: Int
     private var slowFrameStreak = 0
     private var fastFrameStreak = 0
+
+    init(startingFrameRate: Int = 60) {
+        index = Self.frameRates.firstIndex(of: startingFrameRate) ?? 0
+    }
 
     var frameRate: Int {
         Self.frameRates[index]
@@ -138,7 +205,7 @@ struct AdaptiveFrameRateController {
 
         fastFrameStreak += 1
         slowFrameStreak = 0
-        guard fastFrameStreak >= 90 else {
+        guard fastFrameStreak >= 300 else {
             return nil
         }
 
@@ -162,6 +229,68 @@ struct AdaptiveFrameRateController {
     }
 }
 
+struct AdaptiveScaleController {
+    static let scales = [1.0, 0.75, 0.67]
+
+    private(set) var index = 0
+    private var overloadTime: TimeInterval = 0
+    private var healthyTime: TimeInterval = 0
+
+    var scale: Double {
+        Self.scales[index]
+    }
+
+    mutating func update(
+        frameDuration: TimeInterval,
+        encodeDuration: TimeInterval,
+        writeDuration: TimeInterval,
+        frameInterval: TimeInterval,
+        minimumFrameInterval: TimeInterval,
+        staleRetries: Int,
+        hadNetworkStall: Bool
+    ) -> Double? {
+        let encodeBudget = minimumFrameInterval * 1.10
+        let overloaded = hadNetworkStall
+            || frameDuration > frameInterval * 1.25
+            || encodeDuration > encodeBudget
+            || writeDuration > frameInterval * 1.10
+            || staleRetries >= 2
+
+        if overloaded {
+            healthyTime = 0
+            overloadTime += max(frameDuration, frameInterval)
+            guard overloadTime >= 0.5 else {
+                return nil
+            }
+            overloadTime = 0
+            guard index + 1 < Self.scales.count else {
+                return nil
+            }
+            index += 1
+            return scale
+        }
+
+        overloadTime = 0
+        guard index > 0,
+              !hadNetworkStall,
+              staleRetries == 0,
+              frameDuration < frameInterval * 0.85,
+              encodeDuration < encodeBudget * 0.8,
+              writeDuration < frameInterval * 0.8 else {
+            healthyTime = 0
+            return nil
+        }
+
+        healthyTime += max(frameDuration, frameInterval)
+        guard healthyTime >= 5 else {
+            return nil
+        }
+        healthyTime = 0
+        index -= 1
+        return scale
+    }
+}
+
 final class RFBClientSession: @unchecked Sendable {
     private struct FramebufferUpdateRequest {
         let incremental: Bool
@@ -178,6 +307,10 @@ final class RFBClientSession: @unchecked Sendable {
         let encoding: RFBEncoding
         let rects: [Rect]
         let encodedRects: [[UInt8]]
+        let desktopSizeChanged: Bool
+        let changedPixels: Int
+        let uncompressedBytes: Int
+        let payloadBytes: Int
         let captureDuration: TimeInterval
         let diffDuration: TimeInterval
         let encodeDuration: TimeInterval
@@ -197,8 +330,7 @@ final class RFBClientSession: @unchecked Sendable {
     private let adaptiveFrameRate: Bool
     private let logger: ServerLogger
     private var pixelFormat = PixelFormat.serverDefault
-    private var clientEncodings: [Int32] = [RFBEncoding.raw.rawValue]
-    private var isAppleScreenSharingClient = false
+    private var clientCapabilities = RFBClientCapabilities(encodings: [RFBEncoding.raw.rawValue])
     private var previousFramebuffer: Framebuffer?
     private var currentLayout = VirtualDisplayLayout.empty
     private var lastFramebufferUpdate = Date.distantPast
@@ -212,9 +344,15 @@ final class RFBClientSession: @unchecked Sendable {
     private var writerError: Error?
     private var captureRateConsumer: ObjectIdentifier?
     private var networkStallNotifications = 0
+    private var networkStalls = 0
+    private var staleFrameRetries = 0
     private var updatesSent = 0
     private var bytesSent = 0
-    private var adaptiveFrameRateController = AdaptiveFrameRateController()
+    private var adaptiveFrameRateController: AdaptiveFrameRateController
+    private var adaptiveScaleController = AdaptiveScaleController()
+    private var adaptiveScale = 1.0
+    private var frameHadNetworkStall = false
+    private var forceFullFramebuffer = false
 
     init(
         socket: ClientSocket,
@@ -241,6 +379,7 @@ final class RFBClientSession: @unchecked Sendable {
         self.adaptiveStreaming = adaptiveStreaming
         self.adaptiveFrameRate = adaptiveFrameRate
         self.logger = logger
+        adaptiveFrameRateController = AdaptiveFrameRateController(startingFrameRate: fps)
         zrleEncoder = try ZRLEEncoder()
         zlibEncoder = try ZlibEncoder()
     }
@@ -380,13 +519,11 @@ final class RFBClientSession: @unchecked Sendable {
         let encodings = stride(from: 0, to: bytes.count, by: 4).map { offset in
             Int32(bitPattern: UInt32.be(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]))
         }
+        let capabilities = RFBClientCapabilities(encodings: encodings)
         state.lock()
-        clientEncodings = encodings
-        isAppleScreenSharingClient = encodings.contains(1011)
-            || encodings.contains(1002)
-            || encodings.contains(1100)
-            || encodings.contains(1104)
+        clientCapabilities = capabilities
         state.unlock()
+        logger.verbose("client capabilities: \(capabilities.summary)")
     }
 
     private func handleFramebufferUpdateRequestMessage() throws {
@@ -467,9 +604,13 @@ final class RFBClientSession: @unchecked Sendable {
     }
 
     private func sendFramebufferUpdate(_ request: FramebufferUpdateRequest) throws {
+        frameHadNetworkStall = false
         throttleFrameRate()
         let frameStarted = Date()
         let measureTimings = logger.isVerbose
+        state.lock()
+        let allowStaleRetry = !clientCapabilities.isAppleScreenSharingClient
+        state.unlock()
 
         var staleRetries = 0
         var captureDuration = 0.0
@@ -483,7 +624,11 @@ final class RFBClientSession: @unchecked Sendable {
                 diffDuration += candidate.diffDuration
             }
 
-            if staleRetries < 2, try isStale(candidate.framebuffer) {
+            let canRetryStaleFrame = candidate.encodeDuration <= minimumFrameInterval * 1.5
+            if allowStaleRetry,
+               staleRetries < 1,
+               canRetryStaleFrame,
+               try isStale(candidate.framebuffer) {
                 staleRetries += 1
                 continue
             }
@@ -496,31 +641,55 @@ final class RFBClientSession: @unchecked Sendable {
             try commit(transaction)
         }
 
-        let header = [0, 0] + UInt16(prepared.encodedRects.count).beBytes
-        let writeStarted = DispatchTime.now().uptimeNanoseconds
-        try socket.writeAll(header, onStall: { [self] in
-            noteNetworkStall()
-        })
-        var updateBytes = header.count
-        var writeDuration = elapsedSeconds(since: writeStarted)
-
-        for rectResponse in prepared.encodedRects {
-            let rectWriteStarted = DispatchTime.now().uptimeNanoseconds
-            try socket.writeAll(rectResponse, onStall: { [self] in
+        if prepared.desktopSizeChanged {
+            let header = [0, 0] + UInt16(1).beBytes
+            let resizeResponse = desktopSizeResponse(for: prepared.framebuffer)
+            try socket.writeAll([header, resizeResponse], onStall: { [self] in
                 noteNetworkStall()
             })
-            writeDuration += elapsedSeconds(since: rectWriteStarted)
-            updateBytes += rectResponse.count
+
+            state.lock()
+            updatesSent += 1
+            bytesSent += header.count + resizeResponse.count
+            currentLayout = prepared.framebuffer.layout
+            forceFullFramebuffer = true
+            networkStallNotifications = 0
+            state.unlock()
+            return
         }
+
+        let rectCount = prepared.encodedRects.count
+        guard rectCount <= Int(UInt16.max) else {
+            throw RFBError.protocolError("too many rectangles in framebuffer update")
+        }
+        let header = [0, 0] + UInt16(rectCount).beBytes
+        let writeStarted = DispatchTime.now().uptimeNanoseconds
+        var updateChunks = [[UInt8]]()
+        updateChunks.reserveCapacity(1 + prepared.encodedRects.count)
+        updateChunks.append(header)
+        updateChunks.append(contentsOf: prepared.encodedRects)
+        try socket.writeAll(updateChunks, onStall: { [self] in
+            noteNetworkStall()
+        })
+        let updateBytes = updateChunks.reduce(0) { $0 + $1.count }
+        let writeDuration = elapsedSeconds(since: writeStarted)
 
         let frameDuration = Date().timeIntervalSince(frameStarted)
         state.lock()
+        staleFrameRetries += staleRetries
         updatesSent += 1
         bytesSent += updateBytes
         if measureTimings && (updatesSent == 1 || updatesSent % 60 == 0) {
+            let compressionRatio = prepared.payloadBytes > 0
+                ? Double(prepared.uncompressedBytes) / Double(prepared.payloadBytes)
+                : 0
             logger.verbose(
                 "updates=\(updatesSent) encoding=\(prepared.encoding) last_rects=\(prepared.rects.count) " +
                 "bytes=\(updateBytes) total_bytes=\(bytesSent) " +
+                "changed_pixels=\(prepared.changedPixels) " +
+                "raw_bytes=\(prepared.uncompressedBytes) payload_bytes=\(prepared.payloadBytes) " +
+                "compression_ratio=\(String(format: "%.2f", compressionRatio)) " +
+                "stale_retries=\(staleFrameRetries) network_stalls=\(networkStalls) " +
                 "frame_ms=\(Int(frameDuration * 1_000)) " +
                 "capture_ms=\(Int(captureDuration * 1_000)) " +
                 "diff_ms=\(Int(diffDuration * 1_000)) " +
@@ -531,14 +700,23 @@ final class RFBClientSession: @unchecked Sendable {
         previousFramebuffer = prepared.framebuffer
         currentLayout = prepared.framebuffer.layout
         hasSentFramebufferUpdate = true
+        forceFullFramebuffer = false
         networkStallNotifications = 0
         state.unlock()
 
+        let hadNetworkStall = frameHadNetworkStall
         try adaptStreaming(
             frameDuration: frameDuration,
             encodeDuration: prepared.encodeDuration,
             writeDuration: writeDuration,
             encoding: prepared.encoding
+        )
+        adaptScale(
+            frameDuration: frameDuration,
+            encodeDuration: prepared.encodeDuration,
+            writeDuration: writeDuration,
+            staleRetries: staleRetries,
+            hadNetworkStall: hadNetworkStall
         )
         adaptFrameRate(frameDuration: frameDuration)
 
@@ -552,11 +730,34 @@ final class RFBClientSession: @unchecked Sendable {
         measureTimings: Bool
     ) throws -> PreparedFramebufferUpdate {
         let captureStarted = measureTimings ? Date() : .distantPast
-        let framebuffer = try capture.capture()
+        let capturedFramebuffer = try capture.capture()
+        let scale: CGFloat
+        let format: PixelFormat
+        let encoding: RFBEncoding
+        let previous: Framebuffer?
+        let sentBefore: Bool
+        let supportsResize: Bool
+        let forceFull: Bool
+        state.lock()
+        scale = CGFloat(adaptiveScale)
+        format = pixelFormat
+        encoding = selectedEncodingLocked()
+        previous = previousFramebuffer
+        sentBefore = hasSentFramebufferUpdate
+        supportsResize = clientCapabilities.supportsDynamicResize
+        let useEncodingTransaction = !clientCapabilities.isAppleScreenSharingClient
+        forceFull = forceFullFramebuffer
+        state.unlock()
+
+        let framebuffer = try FramebufferResampling.scale(capturedFramebuffer, factor: scale)
         let captureDuration = measureTimings ? Date().timeIntervalSince(captureStarted) : 0
-        let requested = request.rect
-        let (format, encoding, previous, sentBefore) = stateSnapshotForEncoding()
-        let shouldDiff = sentBefore && request.incremental
+        let framebufferSizeChanged = sentBefore
+            && (previous?.width != framebuffer.width || previous?.height != framebuffer.height)
+        let resizeUpdate = framebufferSizeChanged && supportsResize && !forceFull
+        let requested = framebufferSizeChanged || forceFull
+            ? Rect(x: 0, y: 0, width: framebuffer.width, height: framebuffer.height)
+            : request.rect
+        let shouldDiff = sentBefore && request.incremental && !framebufferSizeChanged && !forceFull
         let diffStarted = logger.isVerbose ? Date() : .distantPast
         let dirtyRects: [Rect]?
         if shouldDiff,
@@ -570,34 +771,50 @@ final class RFBClientSession: @unchecked Sendable {
         }
 
         let rects: [Rect]
-        if shouldDiff,
+        if resizeUpdate {
+            rects = []
+        } else if shouldDiff,
            let previous,
            let sequence = framebuffer.sequence,
            previous.sequence == sequence {
             rects = []
         } else {
+            let tileSize = RawEncoding.recommendedTileSize(
+                requested: requested,
+                dirtyRects: dirtyRects
+            )
             rects = RawEncoding.rectangles(
                 current: framebuffer,
                 previous: previous,
                 requested: requested,
                 incremental: shouldDiff,
-                dirtyRects: dirtyRects
+                dirtyRects: dirtyRects,
+                tileSize: tileSize
             )
         }
         let diffDuration = logger.isVerbose ? Date().timeIntervalSince(diffStarted) : 0
         let transaction: EncodingTransaction?
-        switch encoding {
-        case .zlib:
-            transaction = .zlib(try zlibEncoder.beginTransaction())
-        case .zrle:
-            transaction = .zrle(try zrleEncoder.beginTransaction())
-        case .raw:
+        if resizeUpdate {
+            transaction = nil
+        } else if useEncodingTransaction {
+            switch encoding {
+            case .zlib:
+                transaction = .zlib(try zlibEncoder.beginTransaction())
+            case .zrle:
+                transaction = .zrle(try zrleEncoder.beginTransaction())
+            case .raw:
+                transaction = nil
+            }
+        } else {
             transaction = nil
         }
 
         var encodedRects: [[UInt8]] = []
         encodedRects.reserveCapacity(rects.count)
         var encodeDuration = 0.0
+        var changedPixels = 0
+        var uncompressedBytes = 0
+        var payloadBytes = 0
 
         for rect in rects {
             let encodeStarted = DispatchTime.now().uptimeNanoseconds
@@ -608,18 +825,28 @@ final class RFBClientSession: @unchecked Sendable {
                 if case .zrle(let transaction) = transaction {
                     payload = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
                 } else {
-                    throw RFBError.protocolError("missing ZRLE encoding transaction")
+                    payload = try zrleEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
                 }
             case .zlib:
                 if case .zlib(let transaction) = transaction {
                     payload = try transaction.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
                 } else {
-                    throw RFBError.protocolError("missing Zlib encoding transaction")
+                    payload = try zlibEncoder.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
                 }
             case .raw:
                 payload = try RawEncoding.encode(rect: rect, framebuffer: framebuffer, pixelFormat: format)
             }
             encodeDuration += elapsedSeconds(since: encodeStarted)
+            changedPixels += rect.width * rect.height
+            uncompressedBytes += rect.width * rect.height * format.cPixelByteCount
+            let encodedPayloadBytes: Int
+            switch encoding {
+            case .zlib, .zrle:
+                encodedPayloadBytes = max(0, payload.count - 4)
+            case .raw:
+                encodedPayloadBytes = payload.count
+            }
+            payloadBytes += encodedPayloadBytes
 
             var rectResponse: [UInt8] = []
             rectResponse.reserveCapacity(12 + payload.count)
@@ -637,6 +864,10 @@ final class RFBClientSession: @unchecked Sendable {
             encoding: encoding,
             rects: rects,
             encodedRects: encodedRects,
+            desktopSizeChanged: resizeUpdate,
+            changedPixels: changedPixels,
+            uncompressedBytes: uncompressedBytes,
+            payloadBytes: payloadBytes,
             captureDuration: captureDuration,
             diffDuration: diffDuration,
             encodeDuration: encodeDuration,
@@ -669,10 +900,11 @@ final class RFBClientSession: @unchecked Sendable {
         }
     }
 
-    private func stateSnapshotForEncoding() -> (PixelFormat, RFBEncoding, Framebuffer?, Bool) {
-        state.lock()
-        defer { state.unlock() }
-        return (pixelFormat, selectedEncodingLocked(), previousFramebuffer, hasSentFramebufferUpdate)
+    private func desktopSizeResponse(for framebuffer: Framebuffer) -> [UInt8] {
+        [0, 0]
+            + UInt16(framebuffer.width).beBytes
+            + UInt16(framebuffer.height).beBytes
+            + UInt32(bitPattern: RFBPseudoEncoding.desktopSize).beBytes
     }
 
     private func consumeWriterError() -> Error? {
@@ -694,17 +926,17 @@ final class RFBClientSession: @unchecked Sendable {
         case .raw:
             return .raw
         case .zrle:
-            return clientEncodings.contains(RFBEncoding.zrle.rawValue) ? .zrle : .raw
+            return clientCapabilities.supportsZRLE ? .zrle : .raw
         case .zlib:
-            return clientEncodings.contains(RFBEncoding.zlib.rawValue) ? .zlib : .raw
+            return clientCapabilities.supportsZlib ? .zlib : .raw
         case .auto:
-            if isAppleScreenSharingClient, clientEncodings.contains(RFBEncoding.zlib.rawValue) {
+            if clientCapabilities.isAppleScreenSharingClient, clientCapabilities.supportsZlib {
                 return .zlib
             }
-            if clientEncodings.contains(RFBEncoding.zrle.rawValue) {
+            if clientCapabilities.supportsZRLE {
                 return .zrle
             }
-            return clientEncodings.contains(RFBEncoding.zlib.rawValue) ? .zlib : .raw
+            return clientCapabilities.supportsZlib ? .zlib : .raw
         }
     }
 
@@ -741,6 +973,35 @@ final class RFBClientSession: @unchecked Sendable {
         }
     }
 
+    private func adaptScale(
+        frameDuration: TimeInterval,
+        encodeDuration: TimeInterval,
+        writeDuration: TimeInterval,
+        staleRetries: Int,
+        hadNetworkStall: Bool
+    ) {
+        guard adaptiveStreaming,
+              supportsDynamicResize(),
+              updatesSent > 3 else {
+            return
+        }
+
+        guard let scale = adaptiveScaleController.update(
+            frameDuration: frameDuration,
+            encodeDuration: encodeDuration,
+            writeDuration: writeDuration,
+            frameInterval: frameInterval,
+            minimumFrameInterval: minimumFrameInterval,
+            staleRetries: staleRetries,
+            hadNetworkStall: hadNetworkStall
+        ) else {
+            return
+        }
+
+        adaptiveScale = scale
+        logger.verbose("adaptive scale changed to \(String(format: "%.2f", scale))")
+    }
+
     private func adaptFrameRate(frameDuration: TimeInterval) {
         guard adaptiveFrameRate else {
             return
@@ -751,16 +1012,13 @@ final class RFBClientSession: @unchecked Sendable {
         }
 
         frameInterval = 1.0 / Double(frameRate)
-        if let captureRateConsumer {
-            (capture as? CaptureFrameRateController)?.updateCaptureRate(
-                frameRate,
-                consumer: captureRateConsumer
-            )
-        }
+        updateCaptureRateIfSafe(frameRate)
         logger.verbose("adaptive fps changed to \(frameRate)")
     }
 
     private func noteNetworkStall() {
+        frameHadNetworkStall = true
+        networkStalls += 1
         guard adaptiveFrameRate else {
             return
         }
@@ -775,13 +1033,24 @@ final class RFBClientSession: @unchecked Sendable {
         }
 
         frameInterval = 1.0 / Double(frameRate)
-        if let captureRateConsumer {
-            (capture as? CaptureFrameRateController)?.updateCaptureRate(
-                frameRate,
-                consumer: captureRateConsumer
-            )
-        }
+        updateCaptureRateIfSafe(frameRate)
         logger.verbose("adaptive fps changed to \(frameRate) due to network backpressure")
+    }
+
+    private func updateCaptureRateIfSafe(_ frameRate: Int) {
+        state.lock()
+        let reconfigureCapture = !clientCapabilities.isAppleScreenSharingClient
+        let captureRateConsumer = self.captureRateConsumer
+        state.unlock()
+
+        guard let captureRateConsumer else {
+            return
+        }
+        (capture as? CaptureFrameRateController)?.updateCaptureRate(
+            frameRate,
+            consumer: captureRateConsumer,
+            reconfigureCapture: reconfigureCapture
+        )
     }
 
     private func elapsedSeconds(since start: UInt64) -> TimeInterval {
@@ -799,12 +1068,18 @@ final class RFBClientSession: @unchecked Sendable {
         }
     }
 
+    private func supportsDynamicResize() -> Bool {
+        state.lock()
+        defer { state.unlock() }
+        return clientCapabilities.supportsDynamicResize
+    }
+
     private func handleKeyEvent() throws {
         let bytes = try socket.readExact(7)
         let down = bytes[0] != 0
         let keysym = UInt32.be(bytes[3], bytes[4], bytes[5], bytes[6])
         state.lock()
-        let mapAltToCommand = isAppleScreenSharingClient
+        let mapAltToCommand = clientCapabilities.isAppleScreenSharingClient
         state.unlock()
         requestCaptureRecoveryAfterInput()
         input.key(down: down, keysym: keysym, mapAltToCommand: mapAltToCommand)

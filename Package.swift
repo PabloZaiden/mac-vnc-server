@@ -15,6 +15,7 @@ let package = Package(
             name: "mac-vnc-server",
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("Accelerate"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ScreenCaptureKit"),
