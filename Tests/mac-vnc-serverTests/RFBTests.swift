@@ -196,6 +196,12 @@ import zlib
     #expect(controller.update(frameDuration: 0.010) == 45)
     #expect(controller.update(frameDuration: 0.010) == nil)
     #expect(controller.frameRate == 45)
+
+    for _ in 0..<298 {
+        #expect(controller.update(frameDuration: 0.010) == nil)
+    }
+    #expect(controller.update(frameDuration: 0.010) == 60)
+    #expect(controller.frameRate == 60)
 }
 
 @Test func adaptiveScaleDropsOnlyAfterSustainedOverloadAndRecovers() {
