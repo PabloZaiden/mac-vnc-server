@@ -4,6 +4,7 @@ import Foundation
 
 final class MacInputController: InputController {
     private var lastButtonMask: UInt8 = 0
+    private var lastPoint: CGPoint?
     private var lastScrollTime: TimeInterval?
     private var lastScrollDirection: Int32?
     private var scrollMultiplier = 1.0
@@ -29,9 +30,17 @@ final class MacInputController: InputController {
         postButtonIfChanged(mask: buttonMask, bit: 1, button: .center, downType: .otherMouseDown, upType: .otherMouseUp, point: point)
         postButtonIfChanged(mask: buttonMask, bit: 2, button: .right, downType: .rightMouseDown, upType: .rightMouseUp, point: point)
 
-        let type: CGEventType = (buttonMask & 0b00000111) == 0 ? .mouseMoved : .leftMouseDragged
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        if lastPoint != point {
+            let motion = Self.pointerMotion(for: buttonMask)
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: motion.type,
+                mouseCursorPosition: point,
+                mouseButton: motion.button
+            )?.post(tap: .cghidEventTap)
+        }
         lastButtonMask = buttonMask
+        lastPoint = point
     }
 
     func key(down: Bool, keysym: UInt32, mapAltToCommand: Bool) {
@@ -152,6 +161,19 @@ final class MacInputController: InputController {
 
         let type = isDown ? downType : upType
         CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button)?.post(tap: .cghidEventTap)
+    }
+
+    static func pointerMotion(for buttonMask: UInt8) -> (type: CGEventType, button: CGMouseButton) {
+        if buttonMask & 0b00000001 != 0 {
+            return (.leftMouseDragged, .left)
+        }
+        if buttonMask & 0b00000010 != 0 {
+            return (.otherMouseDragged, .center)
+        }
+        if buttonMask & 0b00000100 != 0 {
+            return (.rightMouseDragged, .right)
+        }
+        return (.mouseMoved, .left)
     }
 
     private func postScroll(direction: Int32) {

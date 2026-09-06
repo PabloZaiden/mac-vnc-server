@@ -79,6 +79,20 @@ import zlib
     #expect(KeySymMapper.eventFlags(for: shiftedKey, base: []).rawValue == 0x00020002)
 }
 
+@Test func pointerMotionUsesTheActiveButton() {
+    let right = MacInputController.pointerMotion(for: 0b00000100)
+    #expect(right.type == .rightMouseDragged)
+    #expect(right.button == .right)
+
+    let center = MacInputController.pointerMotion(for: 0b00000010)
+    #expect(center.type == .otherMouseDragged)
+    #expect(center.button == .center)
+
+    let idle = MacInputController.pointerMotion(for: 0)
+    #expect(idle.type == .mouseMoved)
+    #expect(idle.button == .left)
+}
+
 @Test func scrollDeltaAcceleratesOnlyForFastEvents() {
     #expect(ScrollDeltaPolicy.targetMultiplier(interval: nil) == 1)
     #expect(ScrollDeltaPolicy.targetMultiplier(interval: 0.020) == 1)
