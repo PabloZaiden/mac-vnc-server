@@ -68,6 +68,17 @@ import zlib
     #expect(KeySymMapper.modifier(for: 0xffe7)?.eventFlags.rawValue == 0x00100008)
 }
 
+@Test func shiftRequiredKeysPreserveAnActiveRightShift() {
+    guard let shiftedKey = KeySymMapper.keyStroke(for: 0xfe20) else {
+        Issue.record("expected a shift-required key mapping")
+        return
+    }
+
+    let rightShift = CGEventFlags(rawValue: 0x00020004)
+    #expect(KeySymMapper.eventFlags(for: shiftedKey, base: rightShift).rawValue == rightShift.rawValue)
+    #expect(KeySymMapper.eventFlags(for: shiftedKey, base: []).rawValue == 0x00020002)
+}
+
 @Test func scrollDeltaAcceleratesOnlyForFastEvents() {
     #expect(ScrollDeltaPolicy.targetMultiplier(interval: nil) == 1)
     #expect(ScrollDeltaPolicy.targetMultiplier(interval: 0.020) == 1)

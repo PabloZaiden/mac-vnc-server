@@ -61,10 +61,7 @@ final class MacInputController: InputController {
         }
 
         if let mapped = KeySymMapper.keyStroke(for: keysym) {
-            var flags = modifierFlags
-            if mapped.needsShift {
-                flags.formUnion(CGEventFlags(rawValue: 0x00020002))
-            }
+            let flags = KeySymMapper.eventFlags(for: mapped, base: modifierFlags)
             logger?.verbose(
                 "input key \(down ? "down" : "up") keysym=0x\(String(keysym, radix: 16)) " +
                     "keyCode=\(mapped.keyCode) needsShift=\(mapped.needsShift) " +
@@ -270,6 +267,14 @@ enum KeySymMapper {
             return printable[String(scalar)]
         }
         return nil
+    }
+
+    static func eventFlags(for keyStroke: KeyStroke, base: CGEventFlags) -> CGEventFlags {
+        var flags = base
+        if keyStroke.needsShift, !flags.contains(.maskShift) {
+            flags.formUnion(CGEventFlags(rawValue: 0x00020002))
+        }
+        return flags
     }
 
     static func keyCode(for keysym: UInt32) -> CGKeyCode? {
