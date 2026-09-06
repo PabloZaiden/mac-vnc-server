@@ -55,6 +55,52 @@ import zlib
     #expect(genericResizeCapabilities.supportsDynamicResize)
 }
 
+@Test func keySymMapperMapsNavigationAndModifierKeys() {
+    #expect(KeySymMapper.keyStroke(for: 0xff51)?.keyCode == 123)
+    #expect(KeySymMapper.keyStroke(for: 0xff52)?.keyCode == 126)
+    #expect(KeySymMapper.keyStroke(for: 0xff54)?.keyCode == 125)
+    #expect(KeySymMapper.keyStroke(for: 0xfe20)?.keyCode == 48)
+    #expect(KeySymMapper.keyStroke(for: 0xfe20)?.needsShift == true)
+    #expect(KeySymMapper.modifier(for: 0xffe1)?.keyCode == 56)
+    #expect(KeySymMapper.modifier(for: 0xffe5)?.keyCode == 57)
+    #expect(KeySymMapper.modifier(for: 0xffeb)?.flag == .maskCommand)
+    #expect(KeySymMapper.modifier(for: 0xffe2)?.eventFlags.rawValue == 0x00020004)
+    #expect(KeySymMapper.modifier(for: 0xffe7)?.eventFlags.rawValue == 0x00100008)
+}
+
+@Test func shiftRequiredKeysPreserveAnActiveRightShift() {
+    guard let shiftedKey = KeySymMapper.keyStroke(for: 0xfe20) else {
+        Issue.record("expected a shift-required key mapping")
+        return
+    }
+
+    let rightShift = CGEventFlags(rawValue: 0x00020004)
+    #expect(KeySymMapper.eventFlags(for: shiftedKey, base: rightShift).rawValue == rightShift.rawValue)
+    #expect(KeySymMapper.eventFlags(for: shiftedKey, base: []).rawValue == 0x00020002)
+}
+
+@Test func pointerMotionUsesTheActiveButton() {
+    let right = MacInputController.pointerMotion(for: 0b00000100)
+    #expect(right.type == .rightMouseDragged)
+    #expect(right.button == .right)
+
+    let center = MacInputController.pointerMotion(for: 0b00000010)
+    #expect(center.type == .otherMouseDragged)
+    #expect(center.button == .center)
+
+    let idle = MacInputController.pointerMotion(for: 0)
+    #expect(idle.type == .mouseMoved)
+    #expect(idle.button == .left)
+}
+
+@Test func scrollDeltaAcceleratesOnlyForFastEvents() {
+    #expect(ScrollDeltaPolicy.targetMultiplier(interval: nil) == 1)
+    #expect(ScrollDeltaPolicy.targetMultiplier(interval: 0.020) == 1)
+    #expect(ScrollDeltaPolicy.targetMultiplier(interval: 0.010) > 2)
+    #expect(ScrollDeltaPolicy.targetMultiplier(interval: 0.008) == 4)
+    #expect(ScrollDeltaPolicy.smoothMultiplier(current: 1, target: 4) < 4)
+}
+
 @Test func cliDisablesClipboardSyncByDefault() throws {
     guard case .run(let config) = try CLI.parse(arguments: ["run"]) else {
         Issue.record("expected run command")
