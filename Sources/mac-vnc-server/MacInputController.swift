@@ -4,16 +4,25 @@ import Foundation
 
 final class MacInputController: InputController {
     private var lastButtonMask: UInt8 = 0
-    private var modifierFlags: CGEventFlags = []
+    private var lastScrollTime: TimeInterval?
+    private var lastScrollDirection: Int32?
+    private var scrollMultiplier = 1.0
+    private var activeModifiers: [CGKeyCode: CGEventFlags] = [:]
+    private let logger: ServerLogger?
+    private let keyboardEventSource: CGEventSource?
+
+    init(logger: ServerLogger? = nil) {
+        self.logger = logger
+        keyboardEventSource = CGEventSource(stateID: .combinedSessionState)
+    }
 
     func pointer(buttonMask: UInt8, x: UInt16, y: UInt16, layout: VirtualDisplayLayout) {
         let point = layout.globalPoint(framebufferX: Int(x), framebufferY: Int(y))
 
         if buttonMask & 0b00001000 != 0 {
-            postScroll(deltaY: 4)
-        }
-        if buttonMask & 0b00010000 != 0 {
-            postScroll(deltaY: -4)
+            postScroll(direction: 1)
+        } else if buttonMask & 0b00010000 != 0 {
+            postScroll(direction: -1)
         }
 
         postButtonIfChanged(mask: buttonMask, bit: 0, button: .left, downType: .leftMouseDown, upType: .leftMouseUp, point: point)
@@ -27,43 +36,106 @@ final class MacInputController: InputController {
 
     func key(down: Bool, keysym: UInt32, mapAltToCommand: Bool) {
         if let modifier = KeySymMapper.modifier(for: keysym, mapAltToCommand: mapAltToCommand) {
-            updateModifier(modifier.flag, down: down)
-            postKeyCode(modifier.keyCode, down: down, flags: modifierFlags)
+            guard down || activeModifiers[modifier.keyCode] != nil else {
+                logger?.verbose(
+                    "input key up ignored keysym=0x\(String(keysym, radix: 16)) " +
+                        "modifier keyCode=\(modifier.keyCode) was not down"
+                )
+                return
+            }
+
+            if down {
+                activeModifiers[modifier.keyCode] = modifier.eventFlags
+            } else {
+                activeModifiers.removeValue(forKey: modifier.keyCode)
+            }
+
+            let flags = modifierFlags
+            logger?.verbose(
+                "input key \(down ? "down" : "up") keysym=0x\(String(keysym, radix: 16)) " +
+                    "modifier keyCode=\(modifier.keyCode) flags=0x\(String(flags.rawValue, radix: 16)) " +
+                    "appleAltMap=\(mapAltToCommand)"
+            )
+            postModifier(keyCode: modifier.keyCode, flags: flags)
             return
         }
 
         if let mapped = KeySymMapper.keyStroke(for: keysym) {
             var flags = modifierFlags
             if mapped.needsShift {
-                flags.insert(.maskShift)
+                flags.formUnion(CGEventFlags(rawValue: 0x00020002))
             }
+            logger?.verbose(
+                "input key \(down ? "down" : "up") keysym=0x\(String(keysym, radix: 16)) " +
+                    "keyCode=\(mapped.keyCode) needsShift=\(mapped.needsShift) " +
+                    "flags=0x\(String(flags.rawValue, radix: 16))"
+            )
             postKeyCode(mapped.keyCode, down: down, flags: flags)
             return
         }
 
         guard down, let scalar = UnicodeScalar(keysym), !isControlScalar(scalar) else {
+            logger?.verbose(
+                "input key \(down ? "down" : "up") unmapped keysym=0x\(String(keysym, radix: 16))"
+            )
             return
         }
 
         var chars = [UniChar(scalar.value)]
-        let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
+        let event = makeKeyboardEvent(keyCode: 0, down: true)
         event?.flags = modifierFlags
         event?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
         event?.post(tap: .cghidEventTap)
     }
 
-    private func updateModifier(_ flag: CGEventFlags, down: Bool) {
-        if down {
-            modifierFlags.insert(flag)
-        } else {
-            modifierFlags.remove(flag)
+    func releaseKeys() {
+        for keyCode in activeModifiers.keys.sorted() {
+            activeModifiers.removeValue(forKey: keyCode)
+            postModifier(keyCode: keyCode, flags: modifierFlags)
         }
     }
 
+    private var modifierFlags: CGEventFlags {
+        activeModifiers.values.reduce(into: CGEventFlags()) { flags, modifierFlags in
+            flags.formUnion(modifierFlags)
+        }
+    }
+
+    private func postModifier(keyCode: CGKeyCode, flags: CGEventFlags) {
+        guard let event = makeKeyboardEvent(keyCode: keyCode, down: true) else {
+            return
+        }
+        event.type = .flagsChanged
+        event.setIntegerValueField(.keyboardEventKeycode, value: Int64(keyCode))
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+
     private func postKeyCode(_ keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
-        let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)
-        event?.flags = flags
+        let event = makeKeyboardEvent(keyCode: keyCode, down: down)
+        event?.flags = keyboardFlags(for: keyCode, base: flags)
         event?.post(tap: .cghidEventTap)
+    }
+
+    private func keyboardFlags(for keyCode: CGKeyCode, base flags: CGEventFlags) -> CGEventFlags {
+        switch keyCode {
+        case 123, 124, 125, 126:
+            return flags.union([.maskNumericPad, .maskSecondaryFn])
+        default:
+            return flags
+        }
+    }
+
+    private func makeKeyboardEvent(keyCode: CGKeyCode, down: Bool) -> CGEvent? {
+        guard let keyboardEventSource else {
+            logger?.warning("could not create keyboard event source")
+            return nil
+        }
+        return CGEvent(
+            keyboardEventSource: keyboardEventSource,
+            virtualKey: keyCode,
+            keyDown: down
+        )
     }
 
     private func postButtonIfChanged(
@@ -85,8 +157,39 @@ final class MacInputController: InputController {
         CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button)?.post(tap: .cghidEventTap)
     }
 
-    private func postScroll(deltaY: Int32) {
-        CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: deltaY, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+    private func postScroll(direction: Int32) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let interval: TimeInterval? = if lastScrollDirection == direction, let lastScrollTime {
+            now - lastScrollTime
+        } else {
+            nil
+        }
+        let targetMultiplier = ScrollDeltaPolicy.targetMultiplier(interval: interval)
+        if targetMultiplier == 1 {
+            scrollMultiplier = 1
+        } else {
+            scrollMultiplier = ScrollDeltaPolicy.smoothMultiplier(
+                current: scrollMultiplier,
+                target: targetMultiplier
+            )
+        }
+        let deltaY = direction * Int32((Double(ScrollDeltaPolicy.basePixelsPerEvent) * scrollMultiplier).rounded())
+        lastScrollTime = now
+        lastScrollDirection = direction
+
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: deltaY,
+            wheel2: 0,
+            wheel3: 0
+        ) else {
+            logger?.warning("could not create continuous scroll event")
+            return
+        }
+        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event.post(tap: .cghidEventTap)
     }
 
     private func isControlScalar(_ scalar: UnicodeScalar) -> Bool {
@@ -94,10 +197,57 @@ final class MacInputController: InputController {
     }
 }
 
+struct ScrollDeltaPolicy {
+    static let basePixelsPerEvent: Int32 = 10
+    private static let normalEventInterval = 1.0 / 60.0
+    private static let maximumAccelerationInterval = 0.008
+
+    static func targetMultiplier(interval: TimeInterval?) -> Double {
+        guard let interval, interval < normalEventInterval else {
+            return 1
+        }
+
+        let progress = min(
+            1,
+            (normalEventInterval - interval) / (normalEventInterval - maximumAccelerationInterval)
+        )
+        return 1 + progress * 3
+    }
+
+    static func smoothMultiplier(current: Double, target: Double) -> Double {
+        current + (target - current) * 0.35
+    }
+}
+
 enum KeySymMapper {
     struct Modifier {
         let keyCode: CGKeyCode
         let flag: CGEventFlags
+
+        var eventFlags: CGEventFlags {
+            switch keyCode {
+            case 56:
+                return CGEventFlags(rawValue: 0x00020002)
+            case 60:
+                return CGEventFlags(rawValue: 0x00020004)
+            case 59:
+                return CGEventFlags(rawValue: 0x00040001)
+            case 62:
+                return CGEventFlags(rawValue: 0x00042000)
+            case 55:
+                return CGEventFlags(rawValue: 0x00100008)
+            case 54:
+                return CGEventFlags(rawValue: 0x00100010)
+            case 58:
+                return CGEventFlags(rawValue: 0x00080020)
+            case 61:
+                return CGEventFlags(rawValue: 0x00080040)
+            case 57:
+                return CGEventFlags(rawValue: 0x00010000)
+            default:
+                return flag
+            }
+        }
     }
 
     struct KeyStroke {
@@ -134,7 +284,10 @@ enum KeySymMapper {
         0xffe7: Modifier(keyCode: 55, flag: .maskCommand),
         0xffe8: Modifier(keyCode: 54, flag: .maskCommand),
         0xffe9: Modifier(keyCode: 58, flag: .maskAlternate),
-        0xffea: Modifier(keyCode: 61, flag: .maskAlternate)
+        0xffea: Modifier(keyCode: 61, flag: .maskAlternate),
+        0xffeb: Modifier(keyCode: 55, flag: .maskCommand),
+        0xffec: Modifier(keyCode: 54, flag: .maskCommand),
+        0xffe5: Modifier(keyCode: 57, flag: .maskAlphaShift)
     ]
 
     private static let appleScreenSharingModifiers: [UInt32: Modifier] = [
@@ -145,7 +298,10 @@ enum KeySymMapper {
         0xffe7: Modifier(keyCode: 58, flag: .maskAlternate),
         0xffe8: Modifier(keyCode: 61, flag: .maskAlternate),
         0xffe9: Modifier(keyCode: 55, flag: .maskCommand),
-        0xffea: Modifier(keyCode: 54, flag: .maskCommand)
+        0xffea: Modifier(keyCode: 54, flag: .maskCommand),
+        0xffeb: Modifier(keyCode: 55, flag: .maskCommand),
+        0xffec: Modifier(keyCode: 54, flag: .maskCommand),
+        0xffe5: Modifier(keyCode: 57, flag: .maskAlphaShift)
     ]
 
     private static let specialKeys: [UInt32: KeyStroke] = [
@@ -173,7 +329,8 @@ enum KeySymMapper {
         0xffc6: KeyStroke(keyCode: 101, needsShift: false),
         0xffc7: KeyStroke(keyCode: 109, needsShift: false),
         0xffc8: KeyStroke(keyCode: 103, needsShift: false),
-        0xffc9: KeyStroke(keyCode: 111, needsShift: false)
+        0xffc9: KeyStroke(keyCode: 111, needsShift: false),
+        0xfe20: KeyStroke(keyCode: 48, needsShift: true)
     ]
 
     private static let printable: [String: KeyStroke] = [

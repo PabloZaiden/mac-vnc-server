@@ -229,6 +229,7 @@ protocol CaptureFrameRateController {
 protocol InputController {
     func pointer(buttonMask: UInt8, x: UInt16, y: UInt16, layout: VirtualDisplayLayout)
     func key(down: Bool, keysym: UInt32, mapAltToCommand: Bool)
+    func releaseKeys()
 }
 
 protocol ClipboardBridge {

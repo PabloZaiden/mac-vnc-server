@@ -128,7 +128,7 @@ enum CLICommand {
                 logger: logger
             )
         }
-        let input = MacInputController()
+        let input = MacInputController(logger: logger)
         let clipboard = MacClipboard()
         let server = RFBServer(
             config: config,

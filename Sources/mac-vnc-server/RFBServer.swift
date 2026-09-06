@@ -399,6 +399,7 @@ final class RFBClientSession: @unchecked Sendable {
         startFramebufferWriter()
         defer {
             stopFramebufferWriter()
+            input.releaseKeys()
             if let captureRateConsumer = self.captureRateConsumer {
                 (capture as? CaptureFrameRateController)?.unregisterCaptureRateConsumer(captureRateConsumer)
             }
