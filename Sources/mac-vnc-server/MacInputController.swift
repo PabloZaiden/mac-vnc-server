@@ -3,12 +3,22 @@ import CoreGraphics
 import Foundation
 
 final class MacInputController: InputController {
+    private struct ActiveKey {
+        let stroke: KeySymMapper.KeyStroke
+        let baseFlags: CGEventFlags
+        let syntheticShiftKeyCode: CGKeyCode?
+    }
+
     private var lastButtonMask: UInt8 = 0
     private var lastPoint: CGPoint?
     private var lastScrollTime: TimeInterval?
     private var lastScrollDirection: Int32?
     private var scrollMultiplier = 1.0
     private var activeModifiers: [CGKeyCode: CGEventFlags] = [:]
+    private var activeKeys: [CGKeyCode: ActiveKey] = [:]
+    private var shiftPressedWithoutKey = false
+    private var shiftLatchedForNextKey = false
+    private var lastShiftKeyCode: CGKeyCode = 56
     private let logger: ServerLogger?
     private let keyboardEventSource: CGEventSource?
 
@@ -54,9 +64,23 @@ final class MacInputController: InputController {
             }
 
             if down {
+                if modifier.keyCode != 56 && modifier.keyCode != 60 {
+                    shiftPressedWithoutKey = false
+                    shiftLatchedForNextKey = false
+                }
                 activeModifiers[modifier.keyCode] = modifier.eventFlags
+                if modifier.keyCode == 56 || modifier.keyCode == 60 {
+                    lastShiftKeyCode = modifier.keyCode
+                    shiftPressedWithoutKey = true
+                }
             } else {
                 activeModifiers.removeValue(forKey: modifier.keyCode)
+                if modifier.keyCode == 56 || modifier.keyCode == 60 {
+                    if shiftPressedWithoutKey {
+                        shiftLatchedForNextKey = true
+                    }
+                    shiftPressedWithoutKey = false
+                }
             }
 
             let flags = modifierFlags
@@ -69,14 +93,138 @@ final class MacInputController: InputController {
             return
         }
 
-        if let mapped = KeySymMapper.keyStroke(for: keysym) {
-            let flags = KeySymMapper.eventFlags(for: mapped, base: modifierFlags)
+        let recentShift = shiftLatchedForNextKey
+        if down {
+            shiftLatchedForNextKey = false
+            shiftPressedWithoutKey = false
+        }
+
+        if let deadKey = KeySymMapper.deadKey(
+            for: keysym,
+            flags: modifierFlags,
+            recentShift: recentShift
+        ) {
+            if down {
+                let activeKey = activeKeys[deadKey.stroke.keyCode] ?? ActiveKey(
+                    stroke: deadKey.stroke,
+                    baseFlags: modifierFlags,
+                    syntheticShiftKeyCode: syntheticShiftKeyCode(
+                        for: deadKey.stroke,
+                        baseFlags: modifierFlags
+                    )
+                )
+                activeKeys[deadKey.stroke.keyCode] = activeKey
+                let flags = KeySymMapper.eventFlags(
+                    for: activeKey.stroke,
+                    base: activeKey.baseFlags
+                )
+                logger?.verbose(
+                    "input dead key down keysym=0x\(String(keysym, radix: 16)) " +
+                        "dead=\(deadKey.name) keyCode=\(activeKey.stroke.keyCode) " +
+                        "flags=0x\(String(flags.rawValue, radix: 16))"
+                )
+                postKeyStroke(
+                    activeKey.stroke,
+                    down: true,
+                    baseFlags: activeKey.baseFlags,
+                    syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+                )
+            } else if let activeKey = activeKeys.removeValue(forKey: deadKey.stroke.keyCode) {
+                let flags = KeySymMapper.eventFlags(
+                    for: activeKey.stroke,
+                    base: activeKey.baseFlags
+                )
+                logger?.verbose(
+                    "input dead key up keysym=0x\(String(keysym, radix: 16)) " +
+                        "dead=\(deadKey.name) keyCode=\(activeKey.stroke.keyCode) " +
+                        "flags=0x\(String(flags.rawValue, radix: 16))"
+                )
+                postKeyStroke(
+                    activeKey.stroke,
+                    down: false,
+                    baseFlags: activeKey.baseFlags,
+                    syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+                )
+            } else {
+                logger?.verbose(
+                    "input dead key up ignored keysym=0x\(String(keysym, radix: 16)) " +
+                        "dead=\(deadKey.name) was not down"
+                )
+            }
+            return
+        }
+
+        if !down, let keyCode = KeySymMapper.keyCode(for: keysym),
+           let activeKey = activeKeys.removeValue(forKey: keyCode) {
+            let flags = KeySymMapper.eventFlags(
+                for: activeKey.stroke,
+                base: activeKey.baseFlags
+            )
             logger?.verbose(
-                "input key \(down ? "down" : "up") keysym=0x\(String(keysym, radix: 16)) " +
-                    "keyCode=\(mapped.keyCode) needsShift=\(mapped.needsShift) " +
+                "input key up keysym=0x\(String(keysym, radix: 16)) " +
+                    "keyCode=\(activeKey.stroke.keyCode) " +
+                    "needsShift=\(activeKey.stroke.needsShift) " +
                     "flags=0x\(String(flags.rawValue, radix: 16))"
             )
-            postKeyCode(mapped.keyCode, down: down, flags: flags)
+            postKeyStroke(
+                activeKey.stroke,
+                down: false,
+                baseFlags: activeKey.baseFlags,
+                syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+            )
+            return
+        }
+
+        if let mapped = KeySymMapper.keyStroke(for: keysym) {
+            if down {
+                let activeKey = activeKeys[mapped.keyCode] ?? ActiveKey(
+                    stroke: mapped,
+                    baseFlags: modifierFlags,
+                    syntheticShiftKeyCode: syntheticShiftKeyCode(
+                        for: mapped,
+                        baseFlags: modifierFlags
+                    )
+                )
+                activeKeys[mapped.keyCode] = activeKey
+                let flags = KeySymMapper.eventFlags(
+                    for: activeKey.stroke,
+                    base: activeKey.baseFlags
+                )
+                logger?.verbose(
+                    "input key down keysym=0x\(String(keysym, radix: 16)) " +
+                        "keyCode=\(activeKey.stroke.keyCode) " +
+                        "needsShift=\(activeKey.stroke.needsShift) " +
+                        "flags=0x\(String(flags.rawValue, radix: 16))"
+                )
+                postKeyStroke(
+                    activeKey.stroke,
+                    down: true,
+                    baseFlags: activeKey.baseFlags,
+                    syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+                )
+            } else if let activeKey = activeKeys.removeValue(forKey: mapped.keyCode) {
+                let flags = KeySymMapper.eventFlags(
+                    for: activeKey.stroke,
+                    base: activeKey.baseFlags
+                )
+                logger?.verbose(
+                    "input key up keysym=0x\(String(keysym, radix: 16)) " +
+                        "keyCode=\(activeKey.stroke.keyCode) " +
+                        "needsShift=\(activeKey.stroke.needsShift) " +
+                        "flags=0x\(String(flags.rawValue, radix: 16))"
+                )
+                postKeyStroke(
+                    activeKey.stroke,
+                    down: false,
+                    baseFlags: activeKey.baseFlags,
+                    syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+                )
+            } else {
+                logger?.verbose(
+                    "input key up ignored keysym=0x\(String(keysym, radix: 16)) " +
+                        "keyCode=\(mapped.keyCode) was not down"
+                )
+            }
             return
         }
 
@@ -95,6 +243,19 @@ final class MacInputController: InputController {
     }
 
     func releaseKeys() {
+        shiftPressedWithoutKey = false
+        shiftLatchedForNextKey = false
+        for keyCode in activeKeys.keys.sorted() {
+            guard let activeKey = activeKeys.removeValue(forKey: keyCode) else {
+                continue
+            }
+            postKeyStroke(
+                activeKey.stroke,
+                down: false,
+                baseFlags: activeKey.baseFlags,
+                syntheticShiftKeyCode: activeKey.syntheticShiftKeyCode
+            )
+        }
         for keyCode in activeModifiers.keys.sorted() {
             activeModifiers.removeValue(forKey: keyCode)
             postModifier(keyCode: keyCode, flags: modifierFlags)
@@ -121,6 +282,42 @@ final class MacInputController: InputController {
         let event = makeKeyboardEvent(keyCode: keyCode, down: down)
         event?.flags = keyboardFlags(for: keyCode, base: flags)
         event?.post(tap: .cghidEventTap)
+    }
+
+    private func postKeyStroke(
+        _ keyStroke: KeySymMapper.KeyStroke,
+        down: Bool,
+        baseFlags: CGEventFlags,
+        syntheticShiftKeyCode: CGKeyCode?
+    ) {
+        let needsSyntheticShift = keyStroke.needsShift && !baseFlags.contains(.maskShift)
+        let flags = KeySymMapper.eventFlags(
+            for: keyStroke,
+            base: baseFlags,
+            syntheticShiftKeyCode: needsSyntheticShift ? syntheticShiftKeyCode : nil
+        )
+        guard needsSyntheticShift, let syntheticShiftKeyCode else {
+            postKeyCode(keyStroke.keyCode, down: down, flags: flags)
+            return
+        }
+
+        if down {
+            postModifier(keyCode: syntheticShiftKeyCode, flags: flags)
+            postKeyCode(keyStroke.keyCode, down: true, flags: flags)
+        } else {
+            postKeyCode(keyStroke.keyCode, down: false, flags: flags)
+            postModifier(keyCode: syntheticShiftKeyCode, flags: modifierFlags)
+        }
+    }
+
+    private func syntheticShiftKeyCode(
+        for keyStroke: KeySymMapper.KeyStroke,
+        baseFlags: CGEventFlags
+    ) -> CGKeyCode? {
+        guard keyStroke.needsShift, !baseFlags.contains(.maskShift) else {
+            return nil
+        }
+        return lastShiftKeyCode
     }
 
     private func keyboardFlags(for keyCode: CGKeyCode, base flags: CGEventFlags) -> CGEventFlags {
@@ -238,6 +435,44 @@ struct ScrollDeltaPolicy {
     }
 }
 
+enum DeadKey: Hashable {
+    case grave
+    case acute
+    case circumflex
+    case tilde
+    case diaeresis
+
+    var name: String {
+        switch self {
+        case .grave:
+            return "grave"
+        case .acute:
+            return "acute"
+        case .circumflex:
+            return "circumflex"
+        case .tilde:
+            return "tilde"
+        case .diaeresis:
+            return "diaeresis"
+        }
+    }
+
+    var stroke: KeySymMapper.KeyStroke {
+        switch self {
+        case .grave:
+            return KeySymMapper.KeyStroke(keyCode: 50, needsShift: false)
+        case .acute:
+            return KeySymMapper.KeyStroke(keyCode: 39, needsShift: false)
+        case .circumflex:
+            return KeySymMapper.KeyStroke(keyCode: 22, needsShift: true)
+        case .tilde:
+            return KeySymMapper.KeyStroke(keyCode: 50, needsShift: true)
+        case .diaeresis:
+            return KeySymMapper.KeyStroke(keyCode: 39, needsShift: true)
+        }
+    }
+}
+
 enum KeySymMapper {
     struct Modifier {
         let keyCode: CGKeyCode
@@ -285,22 +520,86 @@ enum KeySymMapper {
         if let special = specialKeys[keysym] {
             return special
         }
+        return printableKeyStroke(for: keysym)
+    }
+
+    static func printableKeyStroke(for keysym: UInt32) -> KeyStroke? {
         if let scalar = UnicodeScalar(keysym) {
             return printable[String(scalar)]
         }
         return nil
     }
 
+    static func deadKey(
+        for keysym: UInt32,
+        flags: CGEventFlags,
+        recentShift: Bool
+    ) -> DeadKey? {
+        if let deadKey = deadKeys[keysym] {
+            return deadKey
+        }
+        guard !flags.contains(.maskControl),
+              !flags.contains(.maskAlternate),
+              !flags.contains(.maskCommand)
+        else {
+            return nil
+        }
+
+        switch keysym {
+        case 0x27:
+            return flags.contains(.maskShift) || recentShift ? .diaeresis : .acute
+        case 0x22:
+            return .diaeresis
+        case 0x60:
+            return flags.contains(.maskShift) || recentShift ? .tilde : .grave
+        case 0x7e:
+            return .tilde
+        case 0x5e:
+            return .circumflex
+        case 0x10002dc, 0x1000303:
+            return .tilde
+        case 0x1000300:
+            return .grave
+        case 0x1000301:
+            return .acute
+        case 0x1000302:
+            return .circumflex
+        case 0x1000308:
+            return .diaeresis
+        default:
+            return nil
+        }
+    }
+
     static func eventFlags(for keyStroke: KeyStroke, base: CGEventFlags) -> CGEventFlags {
+        eventFlags(for: keyStroke, base: base, syntheticShiftKeyCode: nil)
+    }
+
+    static func eventFlags(
+        for keyStroke: KeyStroke,
+        base: CGEventFlags,
+        syntheticShiftKeyCode: CGKeyCode?
+    ) -> CGEventFlags {
         var flags = base
         if keyStroke.needsShift, !flags.contains(.maskShift) {
-            flags.formUnion(CGEventFlags(rawValue: 0x00020002))
+            flags.formUnion(shiftFlags(for: syntheticShiftKeyCode ?? 56))
         }
         return flags
     }
 
+    private static func shiftFlags(for keyCode: CGKeyCode) -> CGEventFlags {
+        switch keyCode {
+        case 60:
+            return CGEventFlags(rawValue: 0x00020004)
+        default:
+            return CGEventFlags(rawValue: 0x00020002)
+        }
+    }
+
     static func keyCode(for keysym: UInt32) -> CGKeyCode? {
-        keyStroke(for: keysym)?.keyCode ?? modifier(for: keysym)?.keyCode
+        keyStroke(for: keysym)?.keyCode ??
+            deadKey(for: keysym, flags: [], recentShift: false)?.stroke.keyCode ??
+            modifier(for: keysym)?.keyCode
     }
 
     private static let modifiers: [UInt32: Modifier] = [
@@ -358,6 +657,14 @@ enum KeySymMapper {
         0xffc8: KeyStroke(keyCode: 103, needsShift: false),
         0xffc9: KeyStroke(keyCode: 111, needsShift: false),
         0xfe20: KeyStroke(keyCode: 48, needsShift: true)
+    ]
+
+    private static let deadKeys: [UInt32: DeadKey] = [
+        0xfe50: .grave,
+        0xfe51: .acute,
+        0xfe52: .circumflex,
+        0xfe53: .tilde,
+        0xfe57: .diaeresis
     ]
 
     private static let printable: [String: KeyStroke] = [

@@ -61,11 +61,27 @@ import zlib
     #expect(KeySymMapper.keyStroke(for: 0xff54)?.keyCode == 125)
     #expect(KeySymMapper.keyStroke(for: 0xfe20)?.keyCode == 48)
     #expect(KeySymMapper.keyStroke(for: 0xfe20)?.needsShift == true)
+    #expect(KeySymMapper.deadKey(for: 0xfe50, flags: [], recentShift: false) == .grave)
+    #expect(KeySymMapper.deadKey(for: 0xfe51, flags: [], recentShift: false) == .acute)
+    #expect(KeySymMapper.deadKey(for: 0xfe52, flags: [], recentShift: false) == .circumflex)
+    #expect(KeySymMapper.deadKey(for: 0xfe53, flags: [], recentShift: false) == .tilde)
+    #expect(KeySymMapper.deadKey(for: 0xfe57, flags: [], recentShift: false) == .diaeresis)
     #expect(KeySymMapper.modifier(for: 0xffe1)?.keyCode == 56)
     #expect(KeySymMapper.modifier(for: 0xffe5)?.keyCode == 57)
     #expect(KeySymMapper.modifier(for: 0xffeb)?.flag == .maskCommand)
     #expect(KeySymMapper.modifier(for: 0xffe2)?.eventFlags.rawValue == 0x00020004)
     #expect(KeySymMapper.modifier(for: 0xffe7)?.eventFlags.rawValue == 0x00100008)
+}
+
+@Test func printableDeadKeysymsPreserveCompositionIntent() {
+    #expect(KeySymMapper.deadKey(for: 0x7e, flags: [], recentShift: false) == .tilde)
+    #expect(KeySymMapper.deadKey(for: 0x22, flags: [], recentShift: false) == .diaeresis)
+    #expect(KeySymMapper.deadKey(for: 0x27, flags: [], recentShift: false) == .acute)
+    #expect(KeySymMapper.deadKey(for: 0x27, flags: [], recentShift: true) == .diaeresis)
+    #expect(KeySymMapper.deadKey(for: 0x60, flags: [], recentShift: true) == .tilde)
+    #expect(KeySymMapper.keyCode(for: 0x10002dc) == 50)
+    #expect(KeySymMapper.keyCode(for: 0x1000308) == 39)
+    #expect(KeySymMapper.printableKeyStroke(for: 0xff08) == nil)
 }
 
 @Test func shiftRequiredKeysPreserveAnActiveRightShift() {
