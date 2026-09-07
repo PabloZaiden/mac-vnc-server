@@ -64,6 +64,10 @@ final class MacInputController: InputController {
             }
 
             if down {
+                if modifier.keyCode != 56 && modifier.keyCode != 60 {
+                    shiftPressedWithoutKey = false
+                    shiftLatchedForNextKey = false
+                }
                 activeModifiers[modifier.keyCode] = modifier.eventFlags
                 if modifier.keyCode == 56 || modifier.keyCode == 60 {
                     lastShiftKeyCode = modifier.keyCode
@@ -302,7 +306,7 @@ final class MacInputController: InputController {
             postKeyCode(keyStroke.keyCode, down: true, flags: flags)
         } else {
             postKeyCode(keyStroke.keyCode, down: false, flags: flags)
-            postModifier(keyCode: syntheticShiftKeyCode, flags: baseFlags)
+            postModifier(keyCode: syntheticShiftKeyCode, flags: modifierFlags)
         }
     }
 
