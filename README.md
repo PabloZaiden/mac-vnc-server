@@ -36,7 +36,7 @@ swift build -c release
 The binary is produced at:
 
 ```text
-.build/release/mac-vnc-server
+.build/release/mac-vnc-server-dev
 ```
 
 For an explicit Apple Silicon build:
@@ -44,6 +44,8 @@ For an explicit Apple Silicon build:
 ```sh
 swift build -c release --arch arm64
 ```
+
+Local SwiftPM builds use the `mac-vnc-server-dev` name. The release workflow stages the same product as `mac-vnc-server` after signing it.
 
 ## Versioning
 
@@ -58,26 +60,26 @@ The release workflow replaces that value with the Git tag being released, stripp
 Show the version:
 
 ```sh
-./.build/release/mac-vnc-server version
-./.build/release/mac-vnc-server --help
+./.build/release/mac-vnc-server-dev version
+./.build/release/mac-vnc-server-dev --help
 ```
 
 Startup, connection, and recovery information is always shown. Periodic framebuffer-update logs are shown only when the server is started with `--verbose`. Warnings and errors are always written to stderr.
 
-Update an existing binary from the latest GitHub release:
+Update an installed release binary from the latest GitHub release:
 
 ```sh
-./.build/release/mac-vnc-server update
+mac-vnc-server update
 ```
 
-The command downloads the exact release assets, verifies the binary's SHA-256 checksum, and atomically replaces the executable that was invoked. If a newer release was installed, restart the server process to use it.
+The command downloads the exact release assets, verifies the binary's SHA-256 checksum, and atomically replaces the installed release executable. Development binaries refuse self-update; install or invoke the signed `mac-vnc-server` release binary instead.
 
 ## Permissions
 
 Run this once:
 
 ```sh
-./.build/release/mac-vnc-server permissions
+./.build/release/mac-vnc-server-dev permissions
 ```
 
 Then grant the requested permissions in macOS System Settings:
@@ -90,13 +92,13 @@ Restart the server after granting permissions.
 Check current status:
 
 ```sh
-./.build/release/mac-vnc-server diagnose
+./.build/release/mac-vnc-server-dev diagnose
 ```
 
 If ScreenCaptureKit reports no displays after the Mac turns the screen off, wake the display and start the server again:
 
 ```sh
-./.build/release/mac-vnc-server wakeup
+./.build/release/mac-vnc-server-dev wakeup
 ```
 
 ## Run locally
@@ -104,13 +106,13 @@ If ScreenCaptureKit reports no displays after the Mac turns the screen off, wake
 Default command:
 
 ```sh
-./.build/release/mac-vnc-server
+./.build/release/mac-vnc-server-dev
 ```
 
 Equivalent explicit command:
 
 ```sh
-./.build/release/mac-vnc-server run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto
+./.build/release/mac-vnc-server-dev run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto
 ```
 
 By default, the server exposes both the combined desktop and each display individually:
@@ -150,19 +152,19 @@ Do not store test credentials in Keychain unless you explicitly want that behavi
 Bind all interfaces:
 
 ```sh
-./.build/release/mac-vnc-server --bind 0.0.0.0 --port 5900 --password '<your-password>'
+./.build/release/mac-vnc-server-dev --bind 0.0.0.0 --port 5900 --password '<your-password>'
 ```
 
 Or bind a specific LAN IP:
 
 ```sh
-./.build/release/mac-vnc-server --bind 192.168.1.10 --port 5900 --password '<your-password>'
+./.build/release/mac-vnc-server-dev --bind 192.168.1.10 --port 5900 --password '<your-password>'
 ```
 
 The server refuses unauthenticated non-loopback binds by default. To disable auth for clients that support unauthenticated VNC, you must opt in explicitly:
 
 ```sh
-./.build/release/mac-vnc-server --bind 0.0.0.0 --no-password --insecure-allow-no-auth
+./.build/release/mac-vnc-server-dev --bind 0.0.0.0 --no-password --insecure-allow-no-auth
 ```
 
 Classic VNC password auth is weak and limited by the protocol. For untrusted networks, prefer an SSH tunnel:
@@ -219,7 +221,7 @@ The directory is created with permissions `0700` and the file with `0600`. The p
 Omitting `--display` starts multiple listeners. With the default base port, `5900` keeps the previous combined-desktop behavior and `5901`, `5902`, ... expose each monitor separately:
 
 ```sh
-./.build/release/mac-vnc-server
+./.build/release/mac-vnc-server-dev
 open 'vnc://127.0.0.1:5900'  # all displays
 open 'vnc://127.0.0.1:5901'  # display 1
 open 'vnc://127.0.0.1:5902'  # display 2
@@ -228,19 +230,19 @@ open 'vnc://127.0.0.1:5902'  # display 2
 To keep a single listener with the combined desktop:
 
 ```sh
-./.build/release/mac-vnc-server --display all
+./.build/release/mac-vnc-server-dev --display all
 ```
 
 To serve only one monitor on the selected port:
 
 ```sh
-./.build/release/mac-vnc-server --display 1 --port 5900
+./.build/release/mac-vnc-server-dev --display 1 --port 5900
 ```
 
 Use `diagnose` to list display numbers:
 
 ```sh
-./.build/release/mac-vnc-server diagnose
+./.build/release/mac-vnc-server-dev diagnose
 ```
 
 ## How it works
@@ -297,7 +299,7 @@ For Apple Screen Sharing, `Alt_L` / `Alt_R` keysyms are remapped to macOS Comman
 Clipboard synchronization is disabled by default because the native macOS Screen Sharing client can apply incoming clipboard updates to the client's local pasteboard. Enable basic text synchronization explicitly when it is needed:
 
 ```sh
-./.build/release/mac-vnc-server run --clipboard-sync
+./.build/release/mac-vnc-server-dev run --clipboard-sync
 ```
 
 This uses `NSPasteboard` and classic VNC cut text messages; full extended clipboard support is not implemented yet.
@@ -323,9 +325,32 @@ Runs when a GitHub Release is published:
 
 - replaces `0.0.0-development` in `AppVersion.swift` with the release tag
 - runs tests
-- builds an arm64 macOS release binary
+- builds the `mac-vnc-server-dev` product for arm64
+- stages it as `mac-vnc-server` and signs it with the persistent self-signed macOS certificate
 - prepares the binary plus SHA-256 checksum
 - uploads `mac-vnc-server` and `mac-vnc-server.sha256` to the GitHub Release
+
+The workflow requires these repository secrets:
+
+- `MAC_VNC_SERVER_MACOS_SIGNING_CERT_BASE64`
+- `MAC_VNC_SERVER_MACOS_SIGNING_CERT_PASSWORD`
+
+Generate the persistent certificate locally with:
+
+```sh
+./scripts/generate-macos-signing-cert.sh
+```
+
+Then load the certificate and password into GitHub without printing either secret:
+
+```sh
+base64 < .mac-vnc-server-signing/macos-signing.p12 | tr -d '\n' | \
+  gh secret set MAC_VNC_SERVER_MACOS_SIGNING_CERT_BASE64 --repo PabloZaiden/mac-vnc-server
+gh secret set MAC_VNC_SERVER_MACOS_SIGNING_CERT_PASSWORD \
+  --repo PabloZaiden/mac-vnc-server < .mac-vnc-server-signing/macos-signing-password
+```
+
+The self-signed certificate provides a stable signing identity for macOS permissions; it does not provide notarization or Gatekeeper trust.
 
 ## Troubleshooting
 
@@ -354,7 +379,7 @@ Then restart the server.
 Use the default encoding first:
 
 ```sh
-./.build/release/mac-vnc-server --encoding auto
+./.build/release/mac-vnc-server-dev --encoding auto
 ```
 
 If the display slept while the server was running, wait briefly for the automatic ScreenCaptureKit recovery. If the display is still unavailable, the next keyboard or mouse event sends a `caffeinate` wake signal and triggers another asynchronous recovery attempt. The server logs `ScreenCaptureKit: capture recovered` when the streams are available again. If the server was started while the display was already asleep, run `mac-vnc-server wakeup` and start it again.
@@ -362,9 +387,9 @@ If the display slept while the server was running, wait briefly for the automati
 If testing a generic client, try:
 
 ```sh
-./.build/release/mac-vnc-server --encoding zrle
-./.build/release/mac-vnc-server --encoding zlib
-./.build/release/mac-vnc-server --encoding raw
+./.build/release/mac-vnc-server-dev --encoding zrle
+./.build/release/mac-vnc-server-dev --encoding zlib
+./.build/release/mac-vnc-server-dev --encoding raw
 ```
 
 ### Port already in use
@@ -372,7 +397,7 @@ If testing a generic client, try:
 Use another port:
 
 ```sh
-./.build/release/mac-vnc-server --port 5903
+./.build/release/mac-vnc-server-dev --port 5903
 open 'vnc://127.0.0.1:5903'
 ```
 
@@ -381,8 +406,8 @@ open 'vnc://127.0.0.1:5903'
 Run:
 
 ```sh
-./.build/release/mac-vnc-server permissions
-./.build/release/mac-vnc-server diagnose
+./.build/release/mac-vnc-server-dev permissions
+./.build/release/mac-vnc-server-dev diagnose
 ```
 
 Then restart the server after granting permissions.

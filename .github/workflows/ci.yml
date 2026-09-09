@@ -23,6 +23,5 @@ jobs:
       - name: Run tests
         run: swift test
 
-      - name: Build release
-        run: swift build -c release
-
+      - name: Build development-named release configuration
+        run: swift build -c release --product mac-vnc-server-dev

@@ -7,3 +7,4 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 /.adaptive-streaming-plan.md
+/.mac-vnc-server-signing/
