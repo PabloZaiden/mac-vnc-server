@@ -23,6 +23,57 @@ import zlib
     #expect(config.verbose)
 }
 
+@Test func cliParsesServiceFlagAndRemovesItFromServiceArguments() throws {
+    guard case .service(let config, let arguments) = try CLI.parse(
+        arguments: ["--service", "--port", "5901", "--verbose"]
+    ) else {
+        Issue.record("expected service command")
+        return
+    }
+
+    #expect(config.port == 5901)
+    #expect(config.verbose)
+    #expect(arguments == ["--port", "5901", "--verbose"])
+}
+
+@Test func launchAgentPlistRunsInTheUserUIAsAKeepAliveService() throws {
+    let homeDirectory = URL(fileURLWithPath: "/Users/tester", isDirectory: true)
+    let data = try LaunchAgentService.plistData(
+        executableURL: URL(fileURLWithPath: "/usr/local/bin/mac-vnc-server"),
+        arguments: ["--port", "5901"],
+        homeDirectory: homeDirectory
+    )
+    let propertyList = try #require(
+        PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any]
+    )
+
+    #expect(propertyList["Label"] as? String == LaunchAgentService.label)
+    #expect(propertyList["RunAtLoad"] as? Bool == true)
+    #expect(propertyList["KeepAlive"] as? Bool == true)
+    #expect(propertyList["LimitLoadToSessionType"] as? String == "Aqua")
+    #expect(propertyList["WorkingDirectory"] as? String == homeDirectory.path)
+    #expect(
+        propertyList["ProgramArguments"] as? [String]
+            == ["/usr/local/bin/mac-vnc-server", "--port", "5901"]
+    )
+    #expect(
+        (propertyList["EnvironmentVariables"] as? [String: String])?["HOME"]
+            == homeDirectory.path
+    )
+    #expect(
+        propertyList["StandardOutPath"] as? String
+            == "/Users/tester/Library/Logs/mac-vnc-server/stdout.log"
+    )
+    #expect(
+        propertyList["StandardErrorPath"] as? String
+            == "/Users/tester/Library/Logs/mac-vnc-server/stderr.log"
+    )
+}
+
 @Test func clientCapabilitiesIdentifyStandardAndAppleFeatures() {
     let capabilities = RFBClientCapabilities(encodings: [
         RFBEncoding.raw.rawValue,
