@@ -130,6 +130,12 @@ uses the same server options, so options can be combined with `--service`, for e
 mac-vnc-server --service --bind 0.0.0.0 --port 5900 --password '<your-password>'
 ```
 
+Restart the registered service after replacing the binary:
+
+```sh
+mac-vnc-server --service-restart
+```
+
 Service output is written to:
 
 ```text
@@ -232,6 +238,7 @@ Options:
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
 | `--service` | off | Install and start a per-user macOS LaunchAgent in the logged-in Aqua UI session. |
+| `--service-restart` | — | Restart the registered per-user macOS LaunchAgent. |
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 | `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
 | `--no-adaptive` | off | Disable adaptive FPS, compression, and automatic scale changes. |

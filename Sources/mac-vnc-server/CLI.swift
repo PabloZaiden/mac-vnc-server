@@ -20,6 +20,7 @@ enum CLIError: LocalizedError {
 enum CLICommand {
     case run(ServerConfig)
     case service(ServerConfig, [String])
+    case serviceRestart
     case permissions
     case diagnose
     case wakeup
@@ -34,6 +35,8 @@ enum CLICommand {
         case .service(let config, let arguments):
             _ = try resolvePassword(in: config)
             try LaunchAgentService.install(arguments: arguments)
+        case .serviceRestart:
+            try LaunchAgentService.restart()
         case .permissions:
             Permissions.printAndRequest()
         case .diagnose:
@@ -155,6 +158,13 @@ enum CLI {
     static func parse(arguments: [String]) throws -> CLICommand {
         guard let subcommand = arguments.first else {
             return command(for: try parseRun(arguments))
+        }
+
+        if subcommand == "--service-restart" {
+            guard arguments.count == 1 else {
+                throw CLIError.invalidArgument("--service-restart does not accept server options")
+            }
+            return .serviceRestart
         }
 
         if subcommand.hasPrefix("-") {
@@ -339,6 +349,7 @@ enum CLI {
       mac-vnc-server run [--service] [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps auto|1...120] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
                           [--display all|number] [--verbose] [--clipboard-sync] [--no-adaptive]
+      mac-vnc-server --service-restart
       mac-vnc-server permissions
       mac-vnc-server diagnose
       mac-vnc-server wakeup
@@ -352,6 +363,7 @@ enum CLI {
     Use --clipboard-sync to enable basic text clipboard synchronization.
     Use --no-adaptive to disable adaptive FPS, compression, and scale changes.
     Use --service to install and start a per-user LaunchAgent that runs in the UI session.
+    Use --service-restart to restart the registered LaunchAgent.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }
