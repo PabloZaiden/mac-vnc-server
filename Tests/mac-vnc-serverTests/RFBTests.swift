@@ -36,6 +36,13 @@ import zlib
     #expect(arguments == ["--port", "5901", "--verbose"])
 }
 
+@Test func cliParsesServiceRestartCommand() throws {
+    guard case .serviceRestart = try CLI.parse(arguments: ["--service-restart"]) else {
+        Issue.record("expected service restart command")
+        return
+    }
+}
+
 @Test func launchAgentPlistRunsInTheUserUIAsAKeepAliveService() throws {
     let homeDirectory = URL(fileURLWithPath: "/Users/tester", isDirectory: true)
     let data = try LaunchAgentService.plistData(

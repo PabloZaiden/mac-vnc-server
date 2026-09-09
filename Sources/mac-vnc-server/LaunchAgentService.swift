@@ -5,6 +5,7 @@ enum LaunchAgentServiceError: LocalizedError {
     case rootUser
     case executableUnavailable
     case invalidArguments
+    case serviceNotInstalled
     case launchctlUnavailable(String)
     case launchctlFailed(arguments: [String], status: Int32, output: String)
     case fileSystem(String)
@@ -12,11 +13,13 @@ enum LaunchAgentServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .rootUser:
-            return "the mac-vnc-server service must be registered from the logged-in user session, not as root"
+            return "mac-vnc-server service commands must be run from the logged-in user session, not as root"
         case .executableUnavailable:
             return "could not determine the mac-vnc-server executable path"
         case .invalidArguments:
             return "--service cannot be passed to the registered service command"
+        case .serviceNotInstalled:
+            return "the mac-vnc-server service is not loaded; register it first with 'mac-vnc-server --service'"
         case .launchctlUnavailable(let message):
             return "could not run launchctl: \(message)"
         case .launchctlFailed(let arguments, let status, let output):
@@ -40,18 +43,27 @@ enum LaunchAgentService {
         guard !arguments.contains("--service") else {
             throw LaunchAgentServiceError.invalidArguments
         }
-        guard getuid() != 0 else {
-            throw LaunchAgentServiceError.rootUser
-        }
 
+        let userID = try currentUserID()
         let executableURL = try currentExecutableURL()
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         try install(
             arguments: arguments,
             executableURL: executableURL,
             homeDirectory: homeDirectory,
-            userID: getuid()
+            userID: userID
         )
+    }
+
+    static func restart() throws {
+        let userID = try currentUserID()
+        let target = serviceTarget(for: userID)
+        guard try isLoaded(target) else {
+            throw LaunchAgentServiceError.serviceNotInstalled
+        }
+
+        try runLaunchctl(["kickstart", "-k", target])
+        print("Restarted \(label).")
     }
 
     static func plistData(
@@ -114,7 +126,7 @@ enum LaunchAgentService {
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("mac-vnc-server", isDirectory: true)
-        let serviceTarget = "gui/\(userID)/\(label)"
+        let serviceTarget = serviceTarget(for: userID)
         let serviceDomain = "gui/\(userID)"
 
         guard fileManager.isExecutableFile(atPath: executableURL.path) else {
@@ -159,6 +171,18 @@ enum LaunchAgentService {
             throw LaunchAgentServiceError.executableUnavailable
         }
         return url
+    }
+
+    private static func currentUserID() throws -> uid_t {
+        let userID = getuid()
+        guard userID != 0 else {
+            throw LaunchAgentServiceError.rootUser
+        }
+        return userID
+    }
+
+    private static func serviceTarget(for userID: uid_t) -> String {
+        "gui/\(userID)/\(label)"
     }
 
     private static func createDirectory(
