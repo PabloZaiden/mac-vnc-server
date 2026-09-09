@@ -297,7 +297,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
                 config.queueDepth = 3
-                config.showsCursor = true
+                config.showsCursor = false
 
                 let delegate = ScreenCaptureStreamDelegate(eventSink: eventSink)
                 let stream = SCStream(filter: filter, configuration: config, delegate: delegate)
