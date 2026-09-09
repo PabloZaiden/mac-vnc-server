@@ -19,6 +19,7 @@ enum CLIError: LocalizedError {
 
 enum CLICommand {
     case run(ServerConfig)
+    case service(ServerConfig, [String])
     case permissions
     case diagnose
     case wakeup
@@ -30,6 +31,9 @@ enum CLICommand {
         case .run(let config):
             let resolvedConfig = try resolvePassword(in: config)
             try await runServers(config: resolvedConfig)
+        case .service(let config, let arguments):
+            _ = try resolvePassword(in: config)
+            try LaunchAgentService.install(arguments: arguments)
         case .permissions:
             Permissions.printAndRequest()
         case .diagnose:
@@ -142,18 +146,24 @@ enum CLICommand {
 }
 
 enum CLI {
+    private struct ParsedRun {
+        let config: ServerConfig
+        let registerService: Bool
+        let serviceArguments: [String]
+    }
+
     static func parse(arguments: [String]) throws -> CLICommand {
         guard let subcommand = arguments.first else {
-            return .run(try parseRun(Array(arguments.dropFirst())))
+            return command(for: try parseRun(arguments))
         }
 
         if subcommand.hasPrefix("-") {
-            return .run(try parseRun(arguments))
+            return command(for: try parseRun(arguments))
         }
 
         switch subcommand {
         case "run":
-            return .run(try parseRun(Array(arguments.dropFirst())))
+            return command(for: try parseRun(Array(arguments.dropFirst())))
         case "permissions":
             return .permissions
         case "diagnose":
@@ -171,7 +181,14 @@ enum CLI {
         }
     }
 
-    private static func parseRun(_ arguments: [String]) throws -> ServerConfig {
+    private static func command(for parsedRun: ParsedRun) -> CLICommand {
+        if parsedRun.registerService {
+            return .service(parsedRun.config, parsedRun.serviceArguments)
+        }
+        return .run(parsedRun.config)
+    }
+
+    private static func parseRun(_ arguments: [String]) throws -> ParsedRun {
         var port: UInt16 = 5900
         var bindAddress = "127.0.0.1"
         var password: String?
@@ -185,6 +202,8 @@ enum CLI {
         var clipboardSync = false
         var adaptiveStreaming = true
         var adaptiveFrameRate = true
+        var registerService = false
+        var serviceFlagIndices = Set<Int>()
         var index = 0
 
         while index < arguments.count {
@@ -254,6 +273,9 @@ enum CLI {
                 }
             case "--verbose":
                 verbose = true
+            case "--service":
+                registerService = true
+                serviceFlagIndices.insert(index)
             case "--clipboard-sync":
                 clipboardSync = true
             case "--no-adaptive":
@@ -274,7 +296,7 @@ enum CLI {
             """)
         }
 
-        return ServerConfig(
+        let config = ServerConfig(
             bindAddress: bindAddress,
             port: port,
             password: password,
@@ -287,6 +309,13 @@ enum CLI {
             clipboardSync: clipboardSync,
             adaptiveStreaming: adaptiveStreaming,
             adaptiveFrameRate: adaptiveFrameRate
+        )
+        return ParsedRun(
+            config: config,
+            registerService: registerService,
+            serviceArguments: arguments.enumerated()
+                .filter { !serviceFlagIndices.contains($0.offset) }
+                .map(\.element)
         )
     }
 
@@ -307,7 +336,7 @@ enum CLI {
     mac-vnc-server \(AppVersion.current)
 
     Usage:
-      mac-vnc-server run [--bind 127.0.0.1] [--port 5900] [--password value]
+      mac-vnc-server run [--service] [--bind 127.0.0.1] [--port 5900] [--password value]
                           [--fps auto|1...120] [--scale 1.0] [--encoding auto|zrle|zlib|raw]
                           [--display all|number] [--verbose] [--clipboard-sync] [--no-adaptive]
       mac-vnc-server permissions
@@ -322,6 +351,7 @@ enum CLI {
     Use --verbose to enable periodic framebuffer update logs.
     Use --clipboard-sync to enable basic text clipboard synchronization.
     Use --no-adaptive to disable adaptive FPS, compression, and scale changes.
+    Use --service to install and start a per-user LaunchAgent that runs in the UI session.
     Use --no-password only for clients that accept unauthenticated VNC.
     """
 }

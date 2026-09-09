@@ -115,6 +115,35 @@ Equivalent explicit command:
 ./.build/release/mac-vnc-server-dev run --bind 127.0.0.1 --port 5900 --fps auto --scale 1 --encoding auto
 ```
 
+Register the server as a per-user macOS service and start it immediately:
+
+```sh
+./.build/release/mac-vnc-server-dev --service
+```
+
+This creates `~/Library/LaunchAgents/com.pablozaiden.mac-vnc-server.plist` and runs the
+server in the logged-in user's Aqua UI session. The service starts again automatically
+when that user logs in and is restarted by `launchd` if the process exits. The service
+uses the same server options, so options can be combined with `--service`, for example:
+
+```sh
+mac-vnc-server --service --bind 0.0.0.0 --port 5900 --password '<your-password>'
+```
+
+Service output is written to:
+
+```text
+~/Library/Logs/mac-vnc-server/stdout.log
+~/Library/Logs/mac-vnc-server/stderr.log
+```
+
+To remove the service:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.pablozaiden.mac-vnc-server"
+rm ~/Library/LaunchAgents/com.pablozaiden.mac-vnc-server.plist
+```
+
 By default, the server exposes both the combined desktop and each display individually:
 
 ```text
@@ -202,6 +231,7 @@ Options:
 | `--scale <value>` | `1.0` | Base virtual framebuffer scale. Adaptive sessions may temporarily use `0.75` or `0.67` for compatible generic clients that advertise DesktopSize when encoding or network pressure persists. Apple Screen Sharing remains at the negotiated framebuffer size until its resize dialect is implemented. |
 | `--encoding <auto\|zrle\|zlib\|raw>` | `auto` | Framebuffer encoding preference. |
 | `--display <all\|number>` | automatic | Display mode. Omit it to serve all displays on the base port and each display on consecutive ports. Use `all` for only the combined desktop, or a 1-based display number for only that display. |
+| `--service` | off | Install and start a per-user macOS LaunchAgent in the logged-in Aqua UI session. |
 | `--verbose` | off | Enable periodic framebuffer-update logs on stdout. |
 | `--clipboard-sync` | off | Enable basic text clipboard synchronization with the VNC client. |
 | `--no-adaptive` | off | Disable adaptive FPS, compression, and automatic scale changes. |
