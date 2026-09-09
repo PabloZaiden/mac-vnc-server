@@ -284,7 +284,7 @@ Clients that advertise the standard `DesktopSize` pseudo-encoding can also enter
 Zlib is kept as a persistent stream per VNC connection, which is required for stable compressed updates with Apple Screen Sharing.
 Adaptive compression prioritizes sender throughput: it uses level 1 when encoding is the bottleneck and at most level 3 when the network is the bottleneck. It does not automatically switch to high compression levels during video or animation.
 ZRLE uses lossless solid-color, palette, packed-palette, and run-length tile modes, selecting the smallest representation for each changed tile. Dirty regions use smaller tiles when appropriate, and framebuffer update rectangles are batched into fewer socket writes.
-The cursor remains composited into captured frames. This preserves the exact macOS cursor appearance; the server does not synthesize a separate RichCursor shape because ScreenCaptureKit does not expose that shape through a stable public API.
+The cursor is excluded from captured frames so the VNC client can render a single local cursor. This avoids showing both the captured macOS cursor and the client's pointer at the same time; the server does not synthesize a separate RichCursor shape because ScreenCaptureKit does not expose that shape through a stable public API.
 
 ### Input
 
