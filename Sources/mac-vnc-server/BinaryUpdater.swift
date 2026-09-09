@@ -149,6 +149,13 @@ enum BinaryUpdater {
     }
 
     static func run() async throws {
+        let executableURL = try currentExecutableURL()
+        guard executableURL.lastPathComponent == binaryAssetName else {
+            throw CLIError.commandFailed(
+                "update is only available for the installed release binary '\(binaryAssetName)'"
+            )
+        }
+
         let release = try await fetchLatestRelease()
         guard let latestVersion = SemanticVersion(release.tagName) else {
             throw CLIError.commandFailed("latest release has an invalid version tag '\(release.tagName)'")
@@ -168,7 +175,6 @@ enum BinaryUpdater {
         let checksumData = try await download(checksumAsset.browserDownloadURL)
         try verify(binaryData: binaryData, checksumData: checksumData)
 
-        let executableURL = try currentExecutableURL()
         try replaceExecutable(at: executableURL, with: binaryData)
 
         print("Updated mac-vnc-server from \(AppVersion.current) to \(latestVersion). Restart the server to use the new version.")

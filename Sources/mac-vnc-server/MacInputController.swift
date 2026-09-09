@@ -54,7 +54,11 @@ final class MacInputController: InputController {
     }
 
     func key(down: Bool, keysym: UInt32, mapAltToCommand: Bool) {
-        if let modifier = KeySymMapper.modifier(for: keysym, mapAltToCommand: mapAltToCommand) {
+        if let modifier = modifier(
+            for: keysym,
+            down: down,
+            mapAltToCommand: mapAltToCommand
+        ) {
             guard down || activeModifiers[modifier.keyCode] != nil else {
                 logger?.verbose(
                     "input key up ignored keysym=0x\(String(keysym, radix: 16)) " +
@@ -89,7 +93,7 @@ final class MacInputController: InputController {
                     "modifier keyCode=\(modifier.keyCode) flags=0x\(String(flags.rawValue, radix: 16)) " +
                     "appleAltMap=\(mapAltToCommand)"
             )
-            postModifier(keyCode: modifier.keyCode, flags: flags)
+            postModifier(keyCode: modifier.keyCode, down: down, flags: flags)
             return
         }
 
@@ -105,7 +109,7 @@ final class MacInputController: InputController {
             recentShift: recentShift
         ) {
             if down {
-                let activeKey = activeKeys[deadKey.stroke.keyCode] ?? ActiveKey(
+                let activeKey = ActiveKey(
                     stroke: deadKey.stroke,
                     baseFlags: modifierFlags,
                     syntheticShiftKeyCode: syntheticShiftKeyCode(
@@ -177,7 +181,7 @@ final class MacInputController: InputController {
 
         if let mapped = KeySymMapper.keyStroke(for: keysym) {
             if down {
-                let activeKey = activeKeys[mapped.keyCode] ?? ActiveKey(
+                let activeKey = ActiveKey(
                     stroke: mapped,
                     baseFlags: modifierFlags,
                     syntheticShiftKeyCode: syntheticShiftKeyCode(
@@ -242,6 +246,39 @@ final class MacInputController: InputController {
         event?.post(tap: .cghidEventTap)
     }
 
+    private func modifier(
+        for keysym: UInt32,
+        down: Bool,
+        mapAltToCommand: Bool
+    ) -> KeySymMapper.Modifier? {
+        let preferred = KeySymMapper.modifier(
+            for: keysym,
+            mapAltToCommand: mapAltToCommand
+        )
+        guard !down, let preferred else {
+            return preferred
+        }
+
+        guard activeModifiers[preferred.keyCode] == nil else {
+            return preferred
+        }
+
+        let candidates = KeySymMapper.modifierCandidates(for: keysym)
+        if let activeCandidate = candidates.first(where: {
+            activeModifiers[$0.keyCode] != nil
+        }) {
+            return activeCandidate
+        }
+
+        let matchingKeyCodes = activeModifiers.compactMap { keyCode, flags in
+            candidates.contains(where: { flags.contains($0.flag) }) ? keyCode : nil
+        }
+        guard matchingKeyCodes.count == 1, let keyCode = matchingKeyCodes.first else {
+            return preferred
+        }
+        return KeySymMapper.Modifier(keyCode: keyCode, flag: preferred.flag)
+    }
+
     func releaseKeys() {
         shiftPressedWithoutKey = false
         shiftLatchedForNextKey = false
@@ -258,7 +295,7 @@ final class MacInputController: InputController {
         }
         for keyCode in activeModifiers.keys.sorted() {
             activeModifiers.removeValue(forKey: keyCode)
-            postModifier(keyCode: keyCode, flags: modifierFlags)
+            postModifier(keyCode: keyCode, down: false, flags: modifierFlags)
         }
     }
 
@@ -268,8 +305,8 @@ final class MacInputController: InputController {
         }
     }
 
-    private func postModifier(keyCode: CGKeyCode, flags: CGEventFlags) {
-        guard let event = makeKeyboardEvent(keyCode: keyCode, down: true) else {
+    private func postModifier(keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
+        guard let event = makeKeyboardEvent(keyCode: keyCode, down: down) else {
             return
         }
         event.type = .flagsChanged
@@ -290,10 +327,11 @@ final class MacInputController: InputController {
         baseFlags: CGEventFlags,
         syntheticShiftKeyCode: CGKeyCode?
     ) {
-        let needsSyntheticShift = keyStroke.needsShift && !baseFlags.contains(.maskShift)
+        let eventBaseFlags = down ? baseFlags : modifierFlags
+        let needsSyntheticShift = keyStroke.needsShift && syntheticShiftKeyCode != nil
         let flags = KeySymMapper.eventFlags(
             for: keyStroke,
-            base: baseFlags,
+            base: eventBaseFlags,
             syntheticShiftKeyCode: needsSyntheticShift ? syntheticShiftKeyCode : nil
         )
         guard needsSyntheticShift, let syntheticShiftKeyCode else {
@@ -302,11 +340,11 @@ final class MacInputController: InputController {
         }
 
         if down {
-            postModifier(keyCode: syntheticShiftKeyCode, flags: flags)
+            postModifier(keyCode: syntheticShiftKeyCode, down: true, flags: flags)
             postKeyCode(keyStroke.keyCode, down: true, flags: flags)
         } else {
             postKeyCode(keyStroke.keyCode, down: false, flags: flags)
-            postModifier(keyCode: syntheticShiftKeyCode, flags: modifierFlags)
+            postModifier(keyCode: syntheticShiftKeyCode, down: false, flags: modifierFlags)
         }
     }
 
@@ -516,15 +554,28 @@ enum KeySymMapper {
         return modifiers[keysym]
     }
 
+    static func modifierCandidates(for keysym: UInt32) -> [Modifier] {
+        var candidates: [Modifier] = []
+        if let modifier = modifiers[keysym] {
+            candidates.append(modifier)
+        }
+        if let modifier = appleScreenSharingModifiers[keysym],
+           !candidates.contains(where: { $0.keyCode == modifier.keyCode }) {
+            candidates.append(modifier)
+        }
+        return candidates
+    }
+
     static func keyStroke(for keysym: UInt32) -> KeyStroke? {
-        if let special = specialKeys[keysym] {
+        let normalizedKeysym = normalizeUnicodeKeysym(keysym)
+        if let special = specialKeys[normalizedKeysym] {
             return special
         }
-        return printableKeyStroke(for: keysym)
+        return printableKeyStroke(for: normalizedKeysym)
     }
 
     static func printableKeyStroke(for keysym: UInt32) -> KeyStroke? {
-        if let scalar = UnicodeScalar(keysym) {
+        if let scalar = UnicodeScalar(normalizeUnicodeKeysym(keysym)) {
             return printable[String(scalar)]
         }
         return nil
@@ -535,7 +586,8 @@ enum KeySymMapper {
         flags: CGEventFlags,
         recentShift: Bool
     ) -> DeadKey? {
-        if let deadKey = deadKeys[keysym] {
+        let normalizedKeysym = normalizeUnicodeKeysym(keysym)
+        if let deadKey = deadKeys[normalizedKeysym] {
             return deadKey
         }
         guard !flags.contains(.maskControl),
@@ -545,7 +597,7 @@ enum KeySymMapper {
             return nil
         }
 
-        switch keysym {
+        switch normalizedKeysym {
         case 0x27:
             return flags.contains(.maskShift) || recentShift ? .diaeresis : .acute
         case 0x22:
@@ -602,6 +654,13 @@ enum KeySymMapper {
             modifier(for: keysym)?.keyCode
     }
 
+    private static func normalizeUnicodeKeysym(_ keysym: UInt32) -> UInt32 {
+        if (0x01000000...0x0110ffff).contains(keysym) {
+            return keysym - 0x01000000
+        }
+        return keysym
+    }
+
     private static let modifiers: [UInt32: Modifier] = [
         0xffe1: Modifier(keyCode: 56, flag: .maskShift),
         0xffe2: Modifier(keyCode: 60, flag: .maskShift),
@@ -632,9 +691,13 @@ enum KeySymMapper {
 
     private static let specialKeys: [UInt32: KeyStroke] = [
         0xff08: KeyStroke(keyCode: 51, needsShift: false),
+        0x08: KeyStroke(keyCode: 51, needsShift: false),
         0xff09: KeyStroke(keyCode: 48, needsShift: false),
+        0x09: KeyStroke(keyCode: 48, needsShift: false),
         0xff0d: KeyStroke(keyCode: 36, needsShift: false),
+        0x0d: KeyStroke(keyCode: 36, needsShift: false),
         0xff1b: KeyStroke(keyCode: 53, needsShift: false),
+        0x1b: KeyStroke(keyCode: 53, needsShift: false),
         0xffff: KeyStroke(keyCode: 117, needsShift: false),
         0xff50: KeyStroke(keyCode: 115, needsShift: false),
         0xff51: KeyStroke(keyCode: 123, needsShift: false),
@@ -664,7 +727,13 @@ enum KeySymMapper {
         0xfe51: .acute,
         0xfe52: .circumflex,
         0xfe53: .tilde,
-        0xfe57: .diaeresis
+        0xfe57: .diaeresis,
+        0x0300: .grave,
+        0x0301: .acute,
+        0x0302: .circumflex,
+        0x0303: .tilde,
+        0x0308: .diaeresis,
+        0x02dc: .tilde
     ]
 
     private static let printable: [String: KeyStroke] = [

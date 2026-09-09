@@ -59,6 +59,10 @@ import zlib
     #expect(KeySymMapper.keyStroke(for: 0xff51)?.keyCode == 123)
     #expect(KeySymMapper.keyStroke(for: 0xff52)?.keyCode == 126)
     #expect(KeySymMapper.keyStroke(for: 0xff54)?.keyCode == 125)
+    #expect(KeySymMapper.keyStroke(for: 0x09)?.keyCode == 48)
+    #expect(KeySymMapper.keyStroke(for: 0x09)?.keyCode == KeySymMapper.keyStroke(for: 0xff09)?.keyCode)
+    #expect(KeySymMapper.keyStroke(for: 0x01000009)?.keyCode == 48)
+    #expect(KeySymMapper.keyCode(for: 0x01000060) == 50)
     #expect(KeySymMapper.keyStroke(for: 0xfe20)?.keyCode == 48)
     #expect(KeySymMapper.keyStroke(for: 0xfe20)?.needsShift == true)
     #expect(KeySymMapper.deadKey(for: 0xfe50, flags: [], recentShift: false) == .grave)
@@ -66,11 +70,24 @@ import zlib
     #expect(KeySymMapper.deadKey(for: 0xfe52, flags: [], recentShift: false) == .circumflex)
     #expect(KeySymMapper.deadKey(for: 0xfe53, flags: [], recentShift: false) == .tilde)
     #expect(KeySymMapper.deadKey(for: 0xfe57, flags: [], recentShift: false) == .diaeresis)
+    #expect(KeySymMapper.deadKey(for: 0x01000300, flags: [], recentShift: false) == .grave)
     #expect(KeySymMapper.modifier(for: 0xffe1)?.keyCode == 56)
     #expect(KeySymMapper.modifier(for: 0xffe5)?.keyCode == 57)
     #expect(KeySymMapper.modifier(for: 0xffeb)?.flag == .maskCommand)
     #expect(KeySymMapper.modifier(for: 0xffe2)?.eventFlags.rawValue == 0x00020004)
     #expect(KeySymMapper.modifier(for: 0xffe7)?.eventFlags.rawValue == 0x00100008)
+    #expect(KeySymMapper.modifier(for: 0xffe9, mapAltToCommand: true)?.keyCode == 55)
+    #expect(KeySymMapper.modifier(for: 0xffea, mapAltToCommand: true)?.keyCode == 54)
+}
+
+@Test func modifierCandidatesCoverAppleAndStandardMappings() {
+    let metaLeftCandidates = KeySymMapper.modifierCandidates(for: 0xffe7).map(\.keyCode)
+    #expect(metaLeftCandidates.contains(55))
+    #expect(metaLeftCandidates.contains(58))
+
+    let altLeftCandidates = KeySymMapper.modifierCandidates(for: 0xffe9).map(\.keyCode)
+    #expect(altLeftCandidates.contains(58))
+    #expect(altLeftCandidates.contains(55))
 }
 
 @Test func printableDeadKeysymsPreserveCompositionIntent() {
