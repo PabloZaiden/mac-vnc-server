@@ -86,6 +86,7 @@ enum LaunchAgentService {
             "RunAtLoad": true,
             "KeepAlive": true,
             "LimitLoadToSessionType": "Aqua",
+            "ProcessType": "Interactive",
             "EnvironmentVariables": [
                 "HOME": homeDirectory.path
             ],
