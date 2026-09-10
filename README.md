@@ -124,7 +124,9 @@ Register the server as a per-user macOS service and start it immediately:
 This creates `~/Library/LaunchAgents/com.pablozaiden.mac-vnc-server.plist` and runs the
 server in the logged-in user's Aqua UI session. The service starts again automatically
 when that user logs in and is restarted by `launchd` if the process exits. The service
-uses the same server options, so options can be combined with `--service`, for example:
+is classified as an interactive job so `launchd` does not apply background CPU and I/O
+throttling to the frame-streaming workload. It uses the same server options, so options
+can be combined with `--service`, for example:
 
 ```sh
 mac-vnc-server --service --bind 0.0.0.0 --port 5900 --password '<your-password>'

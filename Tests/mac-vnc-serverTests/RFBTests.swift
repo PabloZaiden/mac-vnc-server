@@ -62,6 +62,7 @@ import zlib
     #expect(propertyList["RunAtLoad"] as? Bool == true)
     #expect(propertyList["KeepAlive"] as? Bool == true)
     #expect(propertyList["LimitLoadToSessionType"] as? String == "Aqua")
+    #expect(propertyList["ProcessType"] as? String == "Interactive")
     #expect(propertyList["WorkingDirectory"] as? String == homeDirectory.path)
     #expect(
         propertyList["ProgramArguments"] as? [String]
