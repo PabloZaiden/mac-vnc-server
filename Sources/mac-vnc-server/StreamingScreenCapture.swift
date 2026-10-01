@@ -260,7 +260,7 @@ final class StreamingScreenCapture: @unchecked Sendable, FramebufferSource, Fram
         eventSink: StreamEventSink,
         logger: ServerLogger
     ) async throws -> StartedCapture {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         let selectedDisplays = try selectDisplays(from: orderedDisplays(content.displays), displaySelection: displaySelection)
         let displays = selectedDisplays.map { display in
             VirtualDisplay(
