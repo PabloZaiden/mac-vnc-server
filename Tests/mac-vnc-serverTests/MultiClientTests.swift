@@ -56,6 +56,28 @@ struct MultiClientTests {
             allowEncryption: false)
     }
 
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_VNC_NATIVE_PROBE"] != nil),
+          arguments: [false, true])
+    func nativeScreenSharingStaysConnectedWhilePaused(encrypted: Bool) throws {
+        let server = try MultiClientServer(fileTransfer: true, width: 1728, height: 1118,
+            nativePattern: true, allowEncryption: encrypted, clipboardSync: false)
+        defer { server.finish() }
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["MAC_VNC_NATIVE_PROBE"]))
+        probe.arguments = ["vnc://127.0.0.1:\(server.port)/", "1", "idle-tickle"]
+        let output = Pipe(); probe.standardOutput = output; probe.standardError = output
+        let finished = DispatchSemaphore(value: 0); probe.terminationHandler = { _ in finished.signal() }
+        try probe.run()
+        guard finished.wait(timeout: .now() + 30) == .success else {
+            probe.terminate(); Issue.record("native idle tickle probe timed out"); return
+        }
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        print(text)
+        #expect(probe.terminationStatus == 0, "\(text)")
+        #expect(text.contains("idleConnected=1 idleSeconds=16 resumedPixels=1 sameSession=1 pixelsStayedPaused=1"), "\(text)")
+        #expect(server.input.snapshot.keyTransitions.isEmpty)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_VNC_NATIVE_PROBE"] != nil), arguments: [false, true])
     func nativeScreenSharingTransfersBeforeMouseRelease(encrypted: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mac-vnc-early-\(UUID())")
@@ -804,6 +826,94 @@ struct MultiClientTests {
         #expect(server.input.snapshot.keyTransitions == [true, false])
     }
 
+    @Test(arguments: [false, true])
+    func appleTicklesKeepPausedViewerAliveWithoutClipboard(clipboardSync: Bool) throws {
+        let server = try MultiClientServer(clipboardSync: clipboardSync)
+        defer { server.finish() }
+        let peer = try server.connect(); defer { peer.finish() }
+        _ = try peer.handshake(version: AppleRFB.version)
+        try peer.advertiseAppleClipboard()
+        let paused: [UInt8] = [9, 0, 0, 1] + UInt32.max.beBytes + fullUpdate.dropFirst(2)
+        // Match minimization: automatic frames paused and no pasteboard subscription.
+        try peer.write([0x15, 0, 0, 2, 0, 0, 0, 0] + fullUpdate + paused)
+        _ = try framePayload(peer, encoding: 0)
+        let started = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<7 {
+            try #require(peer.hasData(timeout: 6), "paused viewer must receive an idle tickle")
+            #expect(try peer.read(8) == [0x14, 0, 0, 4, 0, 1, 0, 4])
+        }
+        #expect(DispatchTime.now().uptimeNanoseconds - started > 13_000_000_000)
+        // No RFB heartbeat reply was sent. The same session must still serve frames.
+        try peer.write(fullUpdate)
+        #expect(try framePayload(peer, encoding: 0).count == 8)
+    }
+
+    @Test func appleTicklesRequireNegotiatedMiscStatus() throws {
+        let server = try MultiClientServer()
+        defer { server.finish() }
+        let classic = try server.connect(); defer { classic.finish() }
+        let unknown = try server.connect(); defer { unknown.finish() }
+        let unsupported = try server.connect(); defer { unsupported.finish() }
+        _ = try classic.handshake(version: "RFB 003.008\n")
+        for peer in [unknown, unsupported] { _ = try peer.handshake(version: AppleRFB.version) }
+        var viewer = [UInt8](repeating: 0, count: 66)
+        viewer[0] = 0x21; viewer[3] = 62; viewer[5] = 1
+        try unsupported.write(viewer)
+        #expect(!classic.hasData(timeout: 4.7))
+        #expect(!unknown.hasData(timeout: 0.1))
+        #expect(!unsupported.hasData(timeout: 0.1))
+        for peer in [classic, unknown, unsupported] {
+            try peer.write(fullUpdate)
+            #expect(try framePayload(peer, encoding: 0).count == 8)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func appleTicklesWaitForFramebufferAndClipboardTraffic(frames: Bool) throws {
+        let server = try MultiClientServer()
+        defer { server.finish() }
+        let peer = try server.connect(); defer { peer.finish() }
+        _ = try peer.handshake(version: AppleRFB.version)
+        try peer.enableAppleClipboard()
+        // Each kind of outgoing traffic independently postpones the idle tickle.
+        for _ in 0..<8 {
+            if frames {
+                try peer.write(fullUpdate)
+                _ = try framePayload(peer, encoding: 0)
+            } else {
+                try fetch(peer)
+                _ = try peer.readClipboard()
+            }
+            #expect(!peer.hasData(timeout: 0.75), "active output should suppress tickles")
+        }
+        try #require(peer.hasData(timeout: 6))
+        #expect(try peer.read(8) == [0x14, 0, 0, 4, 0, 1, 0, 4])
+    }
+
+    @Test(.enabled(if: NativeTransferProcess.available))
+    func appleTicklesFollowEncryptedRecordsAndRekeys() throws {
+        let server = try MultiClientServer(fileTransfer: true, clipboardSync: false)
+        defer { server.finish() }
+        let peer = try server.connect(); defer { peer.finish() }
+        _ = try peer.handshake(version: AppleRFB.version)
+        try peer.advertiseAppleClipboard()
+        var wrappingKey = try #require(peer.appleWrappingKey)
+        for _ in 0..<2 {
+            try peer.write([0x12, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1])
+            #expect(try peer.read(20) == [0, 0, 0, 1] + [UInt8](repeating: 0, count: 8)
+                + UInt32(1103).beBytes + UInt32(1).beBytes)
+            let raw = try AppleEncryption.ecb(peer.read(32), key: wrappingKey, encrypt: false)
+            let keys = AppleEncryption.Keys(key: Array(raw.prefix(16)), iv: Array(raw.suffix(16)))
+            wrappingKey = keys.key
+            try peer.socket.prepareAppleRecordReads(keys: keys, timeout: 3)
+            try peer.socket.enableAppleRecordReads(true)
+            try #require(peer.hasData(timeout: 6))
+            #expect(try peer.read(8) == [0x14, 0, 0, 4, 0, 1, 0, 4])
+            try peer.write(fullUpdate)
+            #expect(try framePayload(peer, encoding: 0).count == 8)
+        }
+    }
+
     @Test func failedAuthenticationAndDisconnectLeaveOtherClientWorking() throws {
         let server = try MultiClientServer()
         defer { server.finish() }
@@ -1035,7 +1145,8 @@ private final class MultiClientServer: @unchecked Sendable {
          authenticationTimeout: TimeInterval = 120, messageTimeout: TimeInterval = 5,
          fileTransfer: Bool = false, width: Int = 2, height: Int = 1, nativePattern: Bool = false,
          clientCursor: Bool = false, allowEncryption: Bool = true, transferInbox: TransferInbox? = nil,
-         encodingPreference: EncodingPreference = .auto, detailedPattern: Bool = false) throws {
+         encodingPreference: EncodingPreference = .auto, detailedPattern: Bool = false,
+         clipboardSync: Bool = true) throws {
         let name = "mac-vnc-test-\(UUID())"
         board = NSPasteboard(name: .init(name))
         clipboard = MacClipboard(pasteboard: board)
@@ -1048,7 +1159,7 @@ private final class MultiClientServer: @unchecked Sendable {
         guard status == 0 else { throw RFBError.socketError("test getsockname failed") }
         port = UInt16(bigEndian: address.sin_port)
         let config = ServerConfig(bindAddress: "127.0.0.1", port: port, fps: 30, scale: 1, encodingPreference: encodingPreference,
-            displaySelection: .all, verbose: false, clipboardSync: true,
+            displaySelection: .all, verbose: false, clipboardSync: clipboardSync,
             adaptiveStreaming: false, adaptiveFrameRate: false, fileTransfer: fileTransfer,
             allowEncryption: allowEncryption)
         let inputs = SharedInputController(input: input)

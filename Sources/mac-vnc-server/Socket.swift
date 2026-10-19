@@ -6,6 +6,9 @@ final class ClientSocket: @unchecked Sendable {
     // Accessed only by the session reader, independently of the writer's timeout.
     private var readDeadline: (time: DispatchTime, operation: String)?
     private static let writeIdleTimeout: TimeInterval = 3
+    // Owned by the handshake thread, then by the session writer. Include all
+    // actual socket writes, including encrypted records and vectored frames.
+    private(set) var lastWriteUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
     private let stateLock = NSLock()
     private var didShutdown = false
     // Each direction is owned by its existing session thread. Rekeying occurs
@@ -186,6 +189,7 @@ final class ClientSocket: @unchecked Sendable {
             if written > 0 {
                 offset += written
                 lastProgress = DispatchTime.now().uptimeNanoseconds
+                lastWriteUptimeNanoseconds = lastProgress
                 continue
             }
             if written == 0 {
@@ -270,6 +274,7 @@ final class ClientSocket: @unchecked Sendable {
                     }
                 }
                 lastProgress = DispatchTime.now().uptimeNanoseconds
+                lastWriteUptimeNanoseconds = lastProgress
                 continue
             }
             if written == 0 {

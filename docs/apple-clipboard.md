@@ -110,6 +110,16 @@ server, this server advertises permission in ServerInit and does not send either
 status in response to SetMode. Repeated mode requests are idempotent; there is no
 timed permission revoke/grant cycle or forced override of an Observe preference.
 
+Apple viewers that advertise MiscStatus support also receive command-4 tickles
+while idle. The writer checks every 2.1 seconds and sends the eight-byte tickle
+after more than two seconds without outgoing data, including while automatic
+framebuffer updates and clipboard synchronization are disabled. Every successful
+socket write postpones it, and encrypted sessions use the same record writer.
+The viewer does not need to reply. This prevents Screen Sharing's receive timeout
+from reconnecting a minimized session; see `docs/apple-idle-keepalive.md` for the
+native implementation evidence. Verbose logs identify each tickle, and disconnect
+summaries include `apple_tickles`.
+
 TCP keepalive probes start after 3 idle seconds, retry at one-second intervals,
 and drop an unreachable peer after three unanswered probes (roughly 6 seconds,
 subject to OS timer scheduling). Brief network outages may require reconnecting.

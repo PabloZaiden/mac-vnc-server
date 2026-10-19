@@ -91,7 +91,7 @@ Local SwiftPM builds use the `mac-vnc-server-dev` name. The release workflow sta
 Local builds report the version recorded in `Sources/mac-vnc-server/AppVersion.swift`:
 
 ```text
-1.2
+1.6
 ```
 
 The release workflow replaces that value with the Git tag being released, stripping a leading `v`. For example, release tag `v1.2.3` builds a binary that reports `1.2.3`.

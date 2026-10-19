@@ -32,6 +32,8 @@ typedef struct { NSInteger width, height; } NativeFramebufferSize;
 - (void)setAllowsFileTransferToRemote:(BOOL)value;
 - (void)setAllowsFileTransferFromRemote:(BOOL)value;
 - (BOOL)isConnected;
+- (void *)rfbConnectionRef;
+- (void)setIsAutoPasteboardEnabled:(BOOL)value;
 - (BOOL)isLegacyVNC;
 - (BOOL)supportsFileTransfer;
 - (BOOL)supportsControlMode;
@@ -160,7 +162,8 @@ int main(int argc, char **argv) {
         if (argc != 4) return 2;
         BOOL fileTransfer = atoi(argv[2]) != 0;
         NSString *initialMode = [NSString stringWithUTF8String:argv[3]];
-        if (!dlopen("/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/ScreenSharing", RTLD_LAZY | RTLD_LOCAL)) return 2;
+        void *framework = dlopen("/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/ScreenSharing", RTLD_LAZY | RTLD_LOCAL);
+        if (!framework) return 2;
         Class viewClass = NSClassFromString(@"SSSessionView");
         if (!viewClass) return 2;
         BOOL expectClientCursor = getenv("MAC_VNC_NATIVE_CURSOR") != NULL;
@@ -257,6 +260,43 @@ int main(int argc, char **argv) {
             passed = passed && restoredObserveBeforePixels;
         }
         printf("initialPixels=%d\n", initialPixels);
+        if ([initialMode isEqualToString:@"idle-tickle"]) {
+            // Exercise the minimize wire request through the native client's
+            // own serialized record writer. Its separate Pause Session command
+            // requests remote permission changes and does not pause this stream.
+            int (*autoUpdate)(void *, uint16_t, uint32_t, const void *) = dlsym(framework, "RFBAutoFrameUpdate");
+            if (!autoUpdate) return 2;
+            id session = [view session];
+            void *connection = [session rfbConnectionRef];
+            [session setIsAutoPasteboardEnabled:NO];
+            int pauseResult = autoUpdate(connection, 1, UINT32_MAX, NULL);
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+            int pausedPhase = testPixelPhase(view);
+            BOOL pixelsStayedPaused = pausedPhase >= 0;
+            NSDate *idleDeadline = [NSDate dateWithTimeIntervalSinceNow:16];
+            BOOL connectedThroughout = pauseResult == 0 && [view isConnected];
+            while (idleDeadline.timeIntervalSinceNow > 0 && connectedThroughout) {
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+                connectedThroughout &= [view isConnected] && [view session] == session
+                    && [session rfbConnectionRef] == connection;
+                pixelsStayedPaused &= testPixelPhase(view) == pausedPhase;
+            }
+            int resumeResult = autoUpdate(connection, 1, 0, NULL);
+            NSDate *resumeDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
+            int phase = testPixelPhase(view);
+            BOOL resumedPixels = NO;
+            while (resumeDeadline.timeIntervalSinceNow > 0 && [view isConnected]) {
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+                int next = testPixelPhase(view);
+                resumedPixels |= phase >= 0 && next >= 0 && phase != next;
+                phase = next;
+            }
+            printf("idleConnected=%d idleSeconds=16 resumedPixels=%d sameSession=%d pixelsStayedPaused=%d\n",
+                connectedThroughout, resumedPixels, [view session] == session, pixelsStayedPaused);
+            fflush(stdout);
+            _exit(initialPixels && connectedThroughout && resumedPixels && pixelsStayedPaused
+                && resumeResult == 0 && [view session] == session ? 0 : 1);
+        }
         if (getenv("MAC_VNC_NATIVE_DETAILED")) {
             BOOL detailed = hasDetailedTestPixels(view);
             printf("detailedPixels=%d\n", detailed);

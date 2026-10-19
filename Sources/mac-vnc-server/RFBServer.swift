@@ -435,6 +435,9 @@ final class RFBClientSession: @unchecked Sendable {
     private var appleAutomaticUpdate: FramebufferUpdateRequest?
     private var applePushInterval: TimeInterval = 0
     private var appleNextPush: UInt64 = 0
+    // Writer-owned. Apple's native timer checks every 2.1 s for >2 s of silence.
+    private var appleNextTickleCheck: UInt64 = 0
+    private var appleTicklesSent = 0
     private var continuousUpdate: FramebufferUpdateRequest?
     private var announcedContinuous = false
     private var announcedFence = false
@@ -509,7 +512,7 @@ final class RFBClientSession: @unchecked Sendable {
         } catch {
             let duration = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
             let lastMessage = lastClientMessage.map { String(format: "0x%02x", Int($0)) } ?? "none"
-            logger.warning("client disconnected: \(error.localizedDescription) source=\(failureSource) duration_s=\(String(format: "%.3f", duration)) last_client_message=\(lastMessage) updates=\(updatesSent) total_bytes=\(bytesSent) network_stalls=\(networkStalls) client_fd=\(socket.fd)")
+            logger.warning("client disconnected: \(error.localizedDescription) source=\(failureSource) duration_s=\(String(format: "%.3f", duration)) last_client_message=\(lastMessage) updates=\(updatesSent) total_bytes=\(bytesSent) network_stalls=\(networkStalls) client_fd=\(socket.fd) apple_tickles=\(appleTicklesSent)")
             throw error
         }
     }
@@ -812,7 +815,7 @@ final class RFBClientSession: @unchecked Sendable {
             state.lock()
             let automaticUpdateDue = (appleAutomaticUpdate != nil && DispatchTime.now().uptimeNanoseconds >= appleNextPush) || continuousUpdate != nil
             if latestUpdateRequest == nil && activeUpdateRequest == nil && !automaticUpdateDue && writerCommands.isEmpty && !pendingAppleDisplayInfo && pendingAppleFramebufferScale == nil && !stopped {
-                // Pasteboard monitoring must keep running without framebuffer requests.
+                // Pasteboard monitoring and idle tickles also run without frame requests.
                 state.unlock()
                 wake.wait(until: .now() + 0.1)
                 state.lock()
@@ -888,7 +891,28 @@ final class RFBClientSession: @unchecked Sendable {
             } else {
                 wake.wait(until: .now() + 0.033)
             }
+            try sendAppleTickleIfNeeded()
         }
+    }
+
+    private func sendAppleTickleIfNeeded() throws {
+        guard usesAppleExtensions else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= appleNextTickleCheck else { return }
+        appleNextTickleCheck = now + 2_100_000_000
+        let idle = now - socket.lastWriteUptimeNanoseconds
+        guard idle > 2_000_000_000 else { return }
+        let eligible = state.withLock {
+            !stopped && writerCommands.isEmpty
+                && AppleRFB.supports(0x14, bitmap: appleViewerCapabilities)
+        }
+        guard eligible else { return }
+        // MiscStatus command 4 is a no-op in the viewer. It keeps its receive
+        // timeout alive even with automatic frames and clipboard sync disabled.
+        // Use the normal writer so records, frames and rekeys stay serialized.
+        try socket.writeAll(AppleRFB.status(4))
+        appleTicklesSent += 1
+        logger.verbose("Apple MiscStatus: tickle sent command=4 idle_ms=\(idle / 1_000_000) count=\(appleTicklesSent) [client_fd=\(socket.fd)]")
     }
 
     private func stopFramebufferWriter() {
