@@ -15,33 +15,12 @@ enum AccountSessionWorker {
                 logger.warning("Selected user session is still locked on console; VNC may show loginwindow in that same session. Account authentication has not moved this desktop off console or unlocked it.")
             }
         }
-        // Both identities use the same capture, cursor and delivery pipeline.
-        // The listener has already installed loginwindow's capture service in
-        // user/0; the attached worker must never fall back to another desktop.
-        let capture = try await StreamingScreenCapture(scale: config.scale, fps: config.fps,
-            displaySelection: config.displaySelection,
-            logger: logger, cursorMode: config.cursorMode,
-            consoleIdentity: options.identity.uid == 0 ? options.identity : nil)
-        let rootInput: ConsoleRootInput?
-        do { rootInput = options.identity.uid == 0 ? try ConsoleRootInput(identity: options.identity) : nil }
-        catch { await capture.stop(); throw error }
-        let inputs: SharedInputController
-        if let rootInput {
-            inputs = SharedInputController(input: MacInputController(logger: ServerLogger(verbose: false),
-                postEvent: { _, event in rootInput.post(event) }))
-        } else { inputs = SharedInputController(input: MacInputController(logger: logger)) }
-        let server = RFBServer(config: config, capture: capture, makeInput: { inputs.makeClient() },
-            makeClipboard: {
-                if options.identity.uid == 0 { return DisabledClipboard() }
-                return MacClipboard()
-            },
-            logger: logger, transferInbox: transferInbox)
-        SessionActivity.shared.attach(server)
+        var desktop: AccountSessionDesktop?
         do {
             try await withTaskCancellationHandler {
                 try channel.ready()
                 while !Task.isCancelled {
-                    try rootInput?.checkDelivery()
+                    try desktop?.rootInput?.checkDelivery()
                     // A locked/background user session remains alive. A logout,
                     // replacement audit session, or root console change does not.
                     guard (try? AccountAuthentication.session(uid: options.identity.uid)) == options.identity else { break }
@@ -51,24 +30,99 @@ enum AccountSessionWorker {
                             try? AccountHandshake.reject(socket: client, version: admission.version)
                             break
                         }
-                        _ = server.serve(client: client, admission: admission)
+                        if desktop == nil {
+                            desktop = try await AccountSessionDesktop(options: options,
+                                transferInbox: transferInbox, logger: logger)
+                            SessionActivity.shared.attach(desktop?.server)
+                        }
+                        try Task.checkCancellation()
+                        _ = desktop?.server.serve(client: client, admission: admission)
+                    }
+                    // Admission and retirement run on this one task. A reconnect
+                    // waits in the channel until the former capture has stopped;
+                    // it can never race shutdown or use a stale desktop frame.
+                    if let idle = desktop, idle.server.activeClientCount == 0 {
+                        await idle.stop()
+                        desktop = nil
+                        SessionActivity.shared.attach(nil)
+                        logger.verbose("Session worker idle: capture and cursor sampling released")
                     }
                 }
-            } onCancel: { channel.shutdown(); server.stop() }
+            } onCancel: { channel.shutdown() }
         } catch {
-            server.stop(); server.waitForClients(); channel.shutdown()
-            await capture.stop()
+            channel.shutdown()
+            await desktop?.stop()
+            SessionActivity.shared.attach(nil)
             throw error
         }
-        server.stop(); server.waitForClients(); channel.shutdown()
+        channel.shutdown()
+        await desktop?.stop()
+        SessionActivity.shared.attach(nil)
+    }
+}
+
+/// Only the account worker persists between viewers. Releasing this desktop
+/// also releases its frame store, stream outputs, cursor task and observers.
+private final class AccountSessionDesktop {
+    let capture: StreamingScreenCapture
+    let rootInput: ConsoleRootInput?
+    let server: RFBServer
+
+    init(options: SessionWorkerOptions, transferInbox: TransferInbox?, logger: ServerLogger) async throws {
+        let config = options.config
+        // Both identities use the same capture, cursor and delivery pipeline.
+        // The listener has already installed loginwindow's capture service in
+        // user/0; the attached worker must never fall back to another desktop.
+        capture = try await StreamingScreenCapture(scale: config.scale, fps: config.fps,
+            displaySelection: config.displaySelection,
+            logger: logger, cursorMode: config.cursorMode,
+            consoleIdentity: options.identity.uid == 0 ? options.identity : nil)
+        do { rootInput = options.identity.uid == 0 ? try ConsoleRootInput(identity: options.identity) : nil }
+        catch { await capture.stop(); throw error }
+        let inputs: SharedInputController
+        if let rootInput {
+            inputs = SharedInputController(input: MacInputController(logger: ServerLogger(verbose: false),
+                postEvent: { _, event in rootInput.post(event) }))
+        } else { inputs = SharedInputController(input: MacInputController(logger: logger)) }
+        server = RFBServer(config: config, capture: capture, makeInput: { inputs.makeClient() },
+            makeClipboard: {
+                if options.identity.uid == 0 { return DisabledClipboard() }
+                return MacClipboard()
+            },
+            logger: logger, transferInbox: transferInbox,
+            onClientCountChange: { SessionActivity.shared.changed() })
+    }
+
+    func stop() async {
+        server.stop(); server.waitForClients()
         await capture.stop()
     }
 }
 
 final class SessionActivity: @unchecked Sendable {
     static let shared = SessionActivity()
+    static let didChangeNotification = Notification.Name("mac-vnc-server.session-activity-changed")
     private let lock = NSLock()
     private weak var server: RFBServer?
-    func attach(_ server: RFBServer) { lock.withLock { self.server = server } }
+    private var notificationPending = false
+    func attach(_ server: RFBServer?) {
+        lock.withLock { self.server = server }
+        changed()
+    }
+    func changed() {
+        let enqueue = lock.withLock {
+            guard !notificationPending else { return false }
+            notificationPending = true
+            return true
+        }
+        guard enqueue else { return }
+        // Status refresh queries WindowServer. Never make admission, client
+        // cleanup or capture retirement wait for AppKit's event loop.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.withLock { self.notificationPending = false }
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        }
+    }
     var clientCount: Int { lock.withLock { server?.activeClientCount ?? 0 } }
 }

@@ -122,4 +122,36 @@ struct ConsolePipelineTests {
         #expect(try store.currentSequence() != sequenceBeforeResume)
     }
 
+    @Test func stoppingOutputReleasesQueuedSurfaceAndIgnoresLateFrames() throws {
+        let store = StreamingFrameStore(layout: VirtualDisplayLayout(displays: [display], scaleOverride: 1),
+            expectedDisplayIDs: [1], acceptedFrameRate: 60)
+        let queue = DispatchQueue(label: "test.capture.stop")
+        let output = ScreenCaptureStreamOutput(displayID: 1, width: 4, height: 2, store: store, deliveryQueue: queue)
+        var buffer: CVPixelBuffer?
+        try #require(CVPixelBufferCreate(nil, 4, 2, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        weak var surface = buffer
+        queue.suspend()
+        output.receive(status: .complete, pixelBuffer: buffer, dirtyRects: nil, presentationTime: 1)
+        buffer = nil
+        #expect(surface != nil) // The pending delivery owns the only surface reference.
+        output.stop()
+        #expect(surface == nil)
+        // Framework callbacks already in flight cannot restart a stopped output.
+        output.receive(status: .blank, pixelBuffer: nil, dirtyRects: nil, presentationTime: 2)
+        queue.resume(); queue.sync {}
+        #expect(throws: (any Error).self) { try store.snapshot() }
+    }
+
+    @Test func startupErrorDoesNotRetainAnUnattachedStream() {
+        let sink = StreamEventSink()
+        weak var retired: SCStream?
+        autoreleasepool {
+            let stream = SCStream(filter: SCContentFilter(), configuration: SCStreamConfiguration(), delegate: nil)
+            retired = stream
+            sink.streamDidStop(stream, error: NSError(domain: "capture-startup-test", code: 1))
+        }
+        #expect(retired == nil)
+        sink.detach()
+    }
+
 }

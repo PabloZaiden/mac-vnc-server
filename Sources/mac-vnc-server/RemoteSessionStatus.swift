@@ -141,14 +141,20 @@ struct PhysicalDisplayIndicator {
 private final class SessionTransitionObservation: @unchecked Sendable {
     private let center: NotificationCenter
     private var tokens: [NSObjectProtocol] = []
+    private var activityToken: NSObjectProtocol?
     @MainActor init(changed: @escaping @Sendable () -> Void) {
         center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.sessionDidResignActiveNotification,
                      NSWorkspace.screensDidWakeNotification, NSWorkspace.screensDidSleepNotification] {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in changed() })
         }
+        activityToken = NotificationCenter.default.addObserver(
+            forName: SessionActivity.didChangeNotification, object: nil, queue: .main) { _ in changed() }
     }
-    deinit { for token in tokens { center.removeObserver(token) } }
+    deinit {
+        for token in tokens { center.removeObserver(token) }
+        if let activityToken { NotificationCenter.default.removeObserver(activityToken) }
+    }
 }
 
 enum LoginWindowSwitch {
@@ -219,10 +225,6 @@ final class RemoteSessionStatus: NSObject, NSMenuDelegate {
         item.menu = menu
         item.button?.setAccessibilityLabel("Remote VNC session")
         item.button?.image = RemoteSessionIcon.eyeBright
-        timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
-        }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
         transitionObservation = SessionTransitionObservation { [weak self] in
             MainActor.assumeIsolated {
                 self?.indicator.invalidate()
@@ -264,6 +266,20 @@ final class RemoteSessionStatus: NSObject, NSMenuDelegate {
         indicator.update(state, at: ProcessInfo.processInfo.systemUptime)
         let eye = indicator.showsEye
         let confirmingHidden = state.isConfirmedHidden && eye
+        // Preserve the physical-visibility warning even with no viewers. Idle
+        // workers show a static icon and refresh on notifications/menu opening;
+        // a hidden transition still needs its second confirmation sample.
+        if count == 0 && !confirmingHidden {
+            timer?.invalidate()
+            timer = nil
+        } else if timer == nil {
+            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] timer in
+                guard let self else { timer.invalidate(); return }
+                MainActor.assumeIsolated { self.refresh() }
+            }
+            self.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
         displayItem.title = confirmingHidden ? "Physical display: confirming hidden session…" : state.description
         let details = ["Worker account: \(NSUserName()) — PID \(getpid()), UID \(getuid())"]
             + state.sessionDetails
@@ -280,14 +296,15 @@ final class RemoteSessionStatus: NSObject, NSMenuDelegate {
         connectionsItem.title = "VNC clients connected: \(count)"
         loginWindowItem.title = switchingToLoginWindow ? "Switching to Login Window…" : "Switch to Login Window"
         loginWindowItem.isEnabled = state.canSwitchToLoginWindow && !switchingToLoginWindow
-        blink.toggle()
+        if count > 0 { blink.toggle() } else { blink = true }
         item.button?.image = eye
             ? (blink ? RemoteSessionIcon.eyeBright : RemoteSessionIcon.eyeDim)
             : RemoteSessionIcon.remoteDisplay
         item.button?.contentTintColor = nil
         item.button?.toolTip = displayItem.title + "\n" + state.reason
         if state != lastDisplayState || count != lastClientCount || eye != lastEye {
-            logger.verbose("VNC menu: \(state.description); clients=\(count) reason=\(state.reason) sessions=\(state.sessionDetails.prefix(2).joined(separator: "; ")) icon=\(eye ? "blinking-red-eye" : "remote-display") visible=\(item.isVisible)")
+            let icon = eye ? (count > 0 ? "blinking-red-eye" : "red-eye") : "remote-display"
+            logger.verbose("VNC menu: \(state.description); clients=\(count) reason=\(state.reason) sessions=\(state.sessionDetails.prefix(2).joined(separator: "; ")) icon=\(icon) visible=\(item.isVisible)")
             lastDisplayState = state
             lastClientCount = count
             lastEye = eye

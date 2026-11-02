@@ -359,6 +359,8 @@ Screen capture uses `ScreenCaptureKit` with one stream per selected display. Cap
 
 Capture streams are rebuilt after screen wake, when the user session moves off or back onto the console, when an active `SCStream` reports `didStopWithError`, or when input arrives after a failed recovery or blank/suspended/stopped capture. Fast User Switching can replace display IDs even when a stream reports no error. Recovery refreshes the shareable content and retries up to three times without closing the existing VNC session. A transition during recovery queues another rebuild so it cannot leave capture attached to obsolete displays. The first valid image after blank/suspended output is delivered in full, including `started` frames. Verbose logs show capture status, geometry, and the display's reported sleep state.
 
+Capture starts when the first viewer reaches an account worker. After the last viewer disconnects, the worker stops capture and cursor sampling and releases the desktop frame buffers, stream outputs, and capture observers. The worker remains available until logout or shutdown; reconnecting starts a fresh capture and waits for its first frame. Overlapping viewers share capture, so one disconnect cannot stop another viewer's desktop. Idle menu indicators keep their physical-visibility warning, stop blinking and regular polling, and refresh on session notifications or menu opening.
+
 When a client or network cannot consume updates quickly enough, the server keeps only the newest captured frame and drops stale frames before sending their RFB update header. Persistent Zlib/ZRLE state is transactional, so a dropped frame cannot desynchronize the stream. Client sockets use non-blocking writes with a three-second no-progress timeout; a connection that makes no write progress is closed instead of blocking the capture pipeline indefinitely. Adaptive sessions lower the output target from 60 to 45 to 30 FPS under sustained pressure and recover after sustained headroom; shared capture streams use the highest rate requested by their active clients.
 
 Clients that advertise the standard `DesktopSize` pseudo-encoding can also enter a per-client scale ladder of `1.0 -> 0.75 -> 0.67` after sustained encoding or network pressure. Frames are resampled with Apple's Accelerate framework using high-quality filtering so the server reduces work and bandwidth only when needed. The session recovers one scale step after five healthy seconds. Clients without standard resize support remain at the configured scale and use FPS/backpressure adaptation instead.
@@ -563,6 +565,14 @@ Screen Recording permission:
 ```sh
 python3 scripts/test-session-capture.py .build/release/mac-vnc-server-dev
 ```
+
+To check repeated reconnects, overlapping viewers, failed handshakes and idle cleanup in a temporary worker:
+
+```sh
+python3 scripts/test-session-capture.py .build/release-latest/mac-vnc-server --cycles 5 --inspect-idle
+```
+
+This probe uses private local connections and does not restart the running server. The optional idle inspection prints CPU/memory samples and a heap leak scan; framework leak findings are reported separately from the lifecycle assertions.
 
 This passes a fixture admission through a private channel, receives a complete
 Zlib frame and RichCursor, and checks worker cleanup without posting input,

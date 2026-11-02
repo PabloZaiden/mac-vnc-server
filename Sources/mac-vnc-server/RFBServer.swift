@@ -121,6 +121,7 @@ final class RFBServer: @unchecked Sendable {
     private let maximumClients: Int
     private let handshakeTimeout: TimeInterval
     private let messageTimeout: TimeInterval
+    private let onClientCountChange: @Sendable () -> Void
     private let lock = NSLock()
     private let workers = DispatchGroup()
     private var stopped = false
@@ -135,7 +136,8 @@ final class RFBServer: @unchecked Sendable {
         maximumClients: Int = 32,
         handshakeTimeout: TimeInterval = 5,
         messageTimeout: TimeInterval = 5,
-        transferInbox: TransferInbox? = nil
+        transferInbox: TransferInbox? = nil,
+        onClientCountChange: @escaping @Sendable () -> Void = {}
     ) {
         self.config = config
         self.capture = capture
@@ -146,6 +148,7 @@ final class RFBServer: @unchecked Sendable {
         self.maximumClients = maximumClients
         self.handshakeTimeout = handshakeTimeout
         self.messageTimeout = messageTimeout
+        self.onClientCountChange = onClientCountChange
     }
 
     var activeClientCount: Int { lock.withLock { clients.count } }
@@ -168,6 +171,7 @@ final class RFBServer: @unchecked Sendable {
             logger.warning("connection rejected: server stopping or client limit reached")
             return false
         }
+        onClientCountChange()
         logger.info("client admitted: client_fd=\(client.fd) rfb=\(admission.version.trimmingCharacters(in: .whitespacesAndNewlines))")
         do {
             // A peer closing during socket setup must only fail its own session.
@@ -188,6 +192,7 @@ final class RFBServer: @unchecked Sendable {
                 defer {
                     session.shutdown()
                     lock.withLock { clients[id] = nil }
+                    onClientCountChange()
                     workers.leave()
                 }
                 // run logs the original failure and session summary after cleanup.
@@ -198,6 +203,7 @@ final class RFBServer: @unchecked Sendable {
             try? AccountHandshake.reject(socket: client, version: admission.version)
             client.shutdown()
             lock.withLock { clients[id] = nil }
+            onClientCountChange()
             logger.warning("could not start client: \(error.localizedDescription)")
             return false
         }

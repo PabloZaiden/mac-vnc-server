@@ -7,6 +7,33 @@ struct RemoteSessionStatusTests {
     private let other = ConsoleIdentity(uid: 502, auditID: 3)
     private let loginWindow = ConsoleIdentity(uid: 0, auditID: 4)
 
+    @MainActor @Test func activityChangesDoNotBlockConnectionThreadsBehindTheUI() async {
+        let activity = SessionActivity()
+        let deliveries = ActivityNotificationCount()
+        let token = NotificationCenter.default.addObserver(
+            forName: SessionActivity.didChangeNotification, object: nil, queue: .main) { _ in
+                deliveries.increment()
+            }
+        defer { NotificationCenter.default.removeObserver(token) }
+        let returned = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            activity.changed()
+            activity.changed()
+            returned.signal()
+        }
+        // Keep the UI occupied while both connection-thread notifications are
+        // sent. They must return before the main queue can deliver either one.
+        func connectionReturnedWithoutRunningUI() -> Bool {
+            returned.wait(timeout: .now() + 1) == .success
+        }
+        #expect(connectionReturnedWithoutRunningUI())
+        for _ in 0..<100 {
+            if deliveries.value != 0 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        withExtendedLifetime(activity) { #expect(deliveries.value == 1) }
+    }
+
     private func state(console: ConsoleIdentity?, onConsole: Bool?, locked: Bool? = nil,
                        stable: Bool = true, verified: Bool = true) -> PhysicalDisplayState {
         PhysicalDisplayState.resolve(uid: 501,
@@ -153,4 +180,11 @@ struct RemoteSessionStatusTests {
             session: .init(identity: loginWindow, onConsole: true, locked: false), console: loginWindow,
             observationsStable: true, sessionVerified: true).canSwitchToLoginWindow)
     }
+}
+
+private final class ActivityNotificationCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }
